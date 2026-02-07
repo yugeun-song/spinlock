@@ -24,7 +24,8 @@ typedef struct {
 
 static inline void spin_init(spinlock_t *lock)
 {
-	if (!lock) return;
+	if (!lock)
+		return;
 	lock->is_locked = IS_SPINLOCK_UNLOCKED;
 }
 
@@ -34,7 +35,8 @@ static inline void spin_lock(spinlock_t *lock)
 	int desired = IS_SPINLOCK_LOCKED;
 	int backoff = g_conf_spin_min;
 
-	if (!lock) return;
+	if (!lock)
+		return;
 
 	while (1) {
 		while (__builtin_expect(lock->is_locked, IS_SPINLOCK_LOCKED) == desired)
@@ -63,7 +65,8 @@ static inline void spin_lock(spinlock_t *lock)
 
 static inline void spin_unlock(spinlock_t *lock)
 {
-	if (!lock) return;
+	if (!lock)
+		return;
 	asm volatile("" ::: "memory");
 	lock->is_locked = IS_SPINLOCK_UNLOCKED;
 }

@@ -180,9 +180,8 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
         }
     }
 
-    for (int i = 0; i < g_conf_nthreads; ++i) {
+    for (int i = 0; i < g_conf_nthreads; ++i)
         pthread_join(threads[i], NULL);
-    }
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     double elapsed_ms = calc_time_diff_ms(&start, &end);
