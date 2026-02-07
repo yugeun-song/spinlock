@@ -8,24 +8,10 @@
 #include <time.h>
 #include <unistd.h>
 
-/*
- * Compile-time constant is strictly required for struct alignment.
- * 64 bytes is the standard for x86-64 (Intel Core/Xeon, AMD Ryzen).
- */
 #define COMPILE_TIME_CACHE_LINE_SIZE 64
-
 #define IS_SPINLOCK_UNLOCKED 0
 #define IS_SPINLOCK_LOCKED 1
 
-/* Defaults */
-#define DEFAULT_SPIN_MIN 4
-#define DEFAULT_SPIN_MAX 16000
-
-/*
- * Global system information (Managed in test.c)
- * Retrieved via Linux System API (sysconf).
- */
-extern long g_sys_cache_line_size;
 extern int g_conf_spin_min;
 extern int g_conf_spin_max;
 
@@ -33,15 +19,12 @@ typedef int spinlock_val_t;
 
 typedef struct {
 	volatile spinlock_val_t is_locked;
-	/*
-	 * Padding ensures the struct size aligns with the cache line
-	 * to prevent false sharing. Size is based on compile-time prediction.
-	 */
 	char x64_aligned_padding[COMPILE_TIME_CACHE_LINE_SIZE - sizeof(spinlock_val_t)];
 } __attribute__((aligned(COMPILE_TIME_CACHE_LINE_SIZE))) spinlock_t;
 
 static inline void spin_init(spinlock_t *lock)
 {
+	if (!lock) return;
 	lock->is_locked = IS_SPINLOCK_UNLOCKED;
 }
 
@@ -50,7 +33,8 @@ static inline void spin_lock(spinlock_t *lock)
 	int expected;
 	int desired = IS_SPINLOCK_LOCKED;
 	int backoff = g_conf_spin_min;
-	int i;
+
+	if (!lock) return;
 
 	while (1) {
 		while (__builtin_expect(lock->is_locked, IS_SPINLOCK_LOCKED) == desired)
@@ -66,7 +50,7 @@ static inline void spin_lock(spinlock_t *lock)
 		if (expected == IS_SPINLOCK_UNLOCKED)
 			return;
 
-		for (i = 0; i < backoff; ++i)
+		for (int i = 0; i < backoff; ++i)
 			asm volatile("pause" ::: "memory");
 
 		backoff *= 2;
@@ -79,6 +63,7 @@ static inline void spin_lock(spinlock_t *lock)
 
 static inline void spin_unlock(spinlock_t *lock)
 {
+	if (!lock) return;
 	asm volatile("" ::: "memory");
 	lock->is_locked = IS_SPINLOCK_UNLOCKED;
 }

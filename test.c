@@ -1,25 +1,33 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
-#include <string.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <errno.h>
+#include <limits.h>
+#include <string.h>
 #include "./spinlock_test.h"
 
-/* Global Configuration Variables */
+#define MIN_THREADS     1
+#define MAX_THREADS     1024
+#define MIN_ITERS       1
+#define MAX_ITERS       INT_MAX
+#define MIN_LOAD        0
+#define MAX_LOAD        INT_MAX
+#define MIN_BACKOFF     0
+#define MAX_BACKOFF     INT_MAX
+
 int g_conf_iterations = DEFAULT_ITERATIONS;
 int g_conf_load_loops = DEFAULT_LOAD_LOOPS;
 int g_conf_nthreads   = DEFAULT_NTHREADS;
 int g_conf_spin_min   = DEFAULT_SPIN_MIN;
 int g_conf_spin_max   = DEFAULT_SPIN_MAX;
 
-/* Runtime detected system information */
 long g_sys_cache_line_size = 0;
 
 static void detect_system_topology(void)
 {
 	g_sys_cache_line_size = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
-
 	if (g_sys_cache_line_size <= 0)
 		g_sys_cache_line_size = 64;
 
@@ -34,49 +42,128 @@ static void detect_system_topology(void)
 
 static void print_help(const char *prog_name)
 {
-	printf("Usage: %s [options]\n"
-	       "Options:\n"
-	       "  -t <threads>   Number of threads (default: %d)\n"
-	       "  -i <iters>     Iterations per thread (default: %d)\n"
-	       "  -l <loops>     Busy work loops (nop) (default: %d)\n"
-	       "  -m <min_spin>  Min spin backoff (default: %d)\n"
-	       "  -M <max_spin>  Max spin backoff (default: %d)\n"
-	       "  -h             Show this help and exit\n",
-	       prog_name, DEFAULT_NTHREADS, DEFAULT_ITERATIONS,
-	       DEFAULT_LOAD_LOOPS, DEFAULT_SPIN_MIN, DEFAULT_SPIN_MAX);
+	fprintf(stderr,
+		"Usage: %s [options]\n"
+		"Options:\n"
+		"  -t <threads>   Number of threads (Range: %d-%d, default: %d)\n"
+		"  -i <iters>     Iterations per thread (Range: %d-%d, default: %d)\n"
+		"  -l <loops>     Dummy Task Count (Mock NOP) (Range: %d-%d, default: %d)\n"
+		"  -m <min_spin>  Min spin backoff (Range: %d-%d, default: %d)\n"
+		"  -M <max_spin>  Max spin backoff (Range: %d-%d, default: %d)\n"
+		"  -h             Show this help and exit\n",
+		prog_name,
+		MIN_THREADS, MAX_THREADS, DEFAULT_NTHREADS,
+		MIN_ITERS, MAX_ITERS, DEFAULT_ITERATIONS,
+		MIN_LOAD, MAX_LOAD, DEFAULT_LOAD_LOOPS,
+		MIN_BACKOFF, MAX_BACKOFF, DEFAULT_SPIN_MIN,
+		MIN_BACKOFF, MAX_BACKOFF, DEFAULT_SPIN_MAX);
+}
+
+static int safe_strtoi(const char *str, int min, int max, const char *name)
+{
+	char *endptr;
+	long val;
+
+	errno = 0;
+	val = strtol(str, &endptr, 10);
+
+	if ((errno == ERANGE && (val == LONG_MAX || val == LONG_MIN))
+	    || (errno != 0 && val == 0)) {
+		perror("strtol");
+		exit(EXIT_FAILURE);
+	}
+
+	if (endptr == str || *endptr != '\0') {
+		fprintf(stderr, "Error: Invalid integer for %s: '%s'\n", name, str);
+		exit(EXIT_FAILURE);
+	}
+
+	if (val < min || val > max) {
+		fprintf(stderr, "Error: %s must be between %d and %d. Got: %ld\n",
+			name, min, max, val);
+		exit(EXIT_FAILURE);
+	}
+
+	return (int)val;
 }
 
 static void parse_args(int argc, char *argv[])
 {
 	int opt;
+	int h_flag = 0;
 
-	while ((opt = getopt(argc, argv, "t:i:l:m:M:h")) != -1) {
+	opterr = 0;
+
+	while ((opt = getopt(argc, argv, "+t:i:l:m:M:h")) != -1) {
 		switch (opt) {
-		case 't': g_conf_nthreads = atoi(optarg); break;
-		case 'i': g_conf_iterations = atoi(optarg); break;
-		case 'l': g_conf_load_loops = atoi(optarg); break;
-		case 'm': g_conf_spin_min = atoi(optarg); break;
-		case 'M': g_conf_spin_max = atoi(optarg); break;
-		case 'h': print_help(argv[0]); exit(0);
-		default:  print_help(argv[0]); exit(1);
+		case 't':
+			g_conf_nthreads = safe_strtoi(optarg, MIN_THREADS, MAX_THREADS, "threads");
+			break;
+		case 'i':
+			g_conf_iterations = safe_strtoi(optarg, MIN_ITERS, MAX_ITERS, "iterations");
+			break;
+		case 'l':
+			g_conf_load_loops = safe_strtoi(optarg, MIN_LOAD, MAX_LOAD, "load_loops");
+			break;
+		case 'm':
+			g_conf_spin_min = safe_strtoi(optarg, MIN_BACKOFF, MAX_BACKOFF, "spin_min");
+			break;
+		case 'M':
+			g_conf_spin_max = safe_strtoi(optarg, MIN_BACKOFF, MAX_BACKOFF, "spin_max");
+			break;
+		case 'h':
+			h_flag = 1;
+			break;
+		case '?':
+			fprintf(stderr, "Error: Invalid option or argument near '-%c'\n", optopt);
+			print_help(argv[0]);
+			exit(EXIT_FAILURE);
+		default:
+			exit(EXIT_FAILURE);
 		}
+	}
+
+	if (h_flag) {
+		if (argc > 2 || strlen(argv[1]) > 2) {
+			fprintf(stderr, "Error: -h cannot be combined with other options.\n");
+			print_help(argv[0]);
+			exit(EXIT_FAILURE);
+		}
+		print_help(argv[0]);
+		exit(EXIT_SUCCESS);
+	}
+
+	if (g_conf_spin_max < g_conf_spin_min) {
+		fprintf(stderr, "Error: Max spin backoff (%d) < Min spin backoff (%d)\n",
+			g_conf_spin_max, g_conf_spin_min);
+		exit(EXIT_FAILURE);
+	}
+
+	if (optind < argc) {
+		fprintf(stderr, "Error: Unexpected positional argument '%s'\n", argv[optind]);
+		print_help(argv[0]);
+		exit(EXIT_FAILURE);
 	}
 }
 
 static double run_benchmark(const char *name, void *(*task_routine)(void *))
 {
-	pthread_t *threads;
-	struct timespec start, end;
-	struct thread_ctx ctx;
-	int local_counter = 0;
-	spinlock_t local_spinlock;
+	pthread_t *threads = NULL;
 	pthread_mutex_t local_mutex;
-	long i;
+	spinlock_t local_spinlock;
+	struct thread_ctx ctx;
+	struct timespec start, end;
 	double elapsed_ms;
 	long long expected = (long long)g_conf_iterations * g_conf_nthreads;
-
+	int local_counter = 0;
+	long i, joined_count = 0;
+	int ret;
+	
 	spin_init(&local_spinlock);
-	pthread_mutex_init(&local_mutex, NULL);
+	if (pthread_mutex_init(&local_mutex, NULL) != 0) {
+		perror("pthread_mutex_init");
+		exit(EXIT_FAILURE);
+	}
 
 	ctx.shared_counter = &local_counter;
 	ctx.spinlock = &local_spinlock;
@@ -84,26 +171,39 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
 
 	threads = malloc(sizeof(pthread_t) * g_conf_nthreads);
 	if (!threads) {
-		perror("malloc failed");
-		exit(1);
+		perror("malloc");
+		pthread_mutex_destroy(&local_mutex);
+		exit(EXIT_FAILURE);
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
-	for (i = 0; i < g_conf_nthreads; i++)
-		pthread_create(&threads[i], NULL, task_routine, &ctx);
+	for (i = 0; i < g_conf_nthreads; ++i) {
+		ret = pthread_create(&threads[i], NULL, task_routine, &ctx);
+		if (ret != 0) {
+			fprintf(stderr, "Error: pthread_create failed at index %ld: %s\n", i, strerror(ret));
+			/* Cleanup created threads before exit */
+			for (long k = 0; k < i; ++k) pthread_join(threads[k], NULL);
+			free(threads);
+			pthread_mutex_destroy(&local_mutex);
+			exit(EXIT_FAILURE);
+		}
+	}
 
-	for (i = 0; i < g_conf_nthreads; i++)
-		pthread_join(threads[i], NULL);
+	for (i = 0; i < g_conf_nthreads; ++i) {
+		if (pthread_join(threads[i], NULL) == 0) joined_count++;
+	}
 
 	clock_gettime(CLOCK_MONOTONIC, &end);
 	elapsed_ms = calc_time_diff_ms(&start, &end);
 
-	printf("[ %-22s ]\n", name);
-	printf("  - Elapsed Time : %10.3f ms\n", elapsed_ms);
-	printf("  - Atomic Count : %10d / %lld (%s)\n", 
-	       local_counter, expected, (local_counter == expected) ? "OK" : "FAIL");
+	printf("[ %-22s ]\n"
+	       "  - Elapsed Time : %10.3f ms\n"
+	       "  - Atomic Count : %10d / %lld (%s)\n",
+	       name, elapsed_ms, local_counter, expected, 
+	       (local_counter == expected) ? "OK" : "FAIL");
 
+	/* Final Resource Cleanup */
 	pthread_mutex_destroy(&local_mutex);
 	free(threads);
 
@@ -113,29 +213,33 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
 int main(int argc, char *argv[])
 {
 	double t_spin, t_mutex;
+	setvbuf(stdout, NULL, _IOLBF, 0);
 
 	detect_system_topology();
 	parse_args(argc, argv);
 
-	printf("\n--- SPINLOCK BENCHMARK SUITE START ---\n");
-	printf("System Info:\n");
-	printf("  L1 Cache Line  : %ld bytes\n", g_sys_cache_line_size);
-	printf("Configuration:\n");
-	printf("  Threads        : %d\n", g_conf_nthreads);
-	printf("  Iterations     : %d\n", g_conf_iterations);
-	printf("  Workload (nop) : %d\n", g_conf_load_loops);
-	printf("  Backoff Range  : %d ~ %d\n", g_conf_spin_min, g_conf_spin_max);
-	printf("--------------------------------------\n\n");
+	printf("\n--- SPINLOCK BENCHMARK SUITE START ---\n"
+	       "System Info:\n"
+	       "  L1 Cache Line  : %ld bytes\n"
+	       "Configuration:\n"
+	       "  Threads        : %d\n"
+	       "  Iterations     : %d\n"
+	       "  Dummy Tasks    : %d\n"
+	       "  Backoff Range  : %d ~ %d\n"
+	       "--------------------------------------\n\n",
+	       g_sys_cache_line_size, g_conf_nthreads, g_conf_iterations,
+	       g_conf_load_loops, g_conf_spin_min, g_conf_spin_max);
 
 	t_spin = run_benchmark("Custom Hybrid Spinlock", task_spinlock);
 	printf("\n");
 	t_mutex = run_benchmark("POSIX Mutex", task_mutex);
 
-	printf("\n--------------------------------------\n");
-	printf("FINAL RESULT:\n");
-	printf("  Speedup Factor : %.2fx (Spinlock/Mutex)\n", t_mutex / t_spin);
-	printf("  Winner         : %s\n", (t_spin < t_mutex) ? "Custom Spinlock" : "POSIX Mutex");
-	printf("--- BENCHMARK SUITE END ---\n\n");
+	printf("\n--------------------------------------\n"
+	       "FINAL RESULT:\n"
+	       "  Speedup Factor : %.2fx\n"
+	       "  Winner         : %s\n"
+	       "--- BENCHMARK SUITE END ---\n\n",
+	       t_mutex / t_spin, (t_spin < t_mutex) ? "Custom Spinlock" : "POSIX Mutex");
 
-	return 0;
+	return EXIT_SUCCESS;
 }
