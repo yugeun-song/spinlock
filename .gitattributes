@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.c text working-tree-encoding=UTF-8
+*.h text working-tree-encoding=UTF-8
+Makefile text working-tree-encoding=UTF-8

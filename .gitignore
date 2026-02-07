@@ -1,0 +1,15 @@
+# Ignore the entire build directory
+/bin/
+
+# Ignore object files and other binaries
+*.o
+spinlock_test
+
+# Ignore GDB history and debug files
+.gdb_history
+gdb.txt
+core.*
+
+# Ignore any potential shared library files
+*.so
+*.a
