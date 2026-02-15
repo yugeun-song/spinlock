@@ -15,15 +15,19 @@ double calc_time_diff_ms(struct timespec *start, struct timespec *end)
 void *task_spinlock(void *arg)
 {
     struct thread_ctx *ctx = (struct thread_ctx *)arg;
+    int i, j;
+
     if (!ctx)
         return NULL;
 
-    for (int i = 0; i < g_conf_iterations; ++i) {
+    for (i = 0; i < g_conf_iterations; ++i) {
         spin_lock(ctx->spinlock);
         ++(*ctx->shared_counter);
 
-        /* Ensure dummy workload is not optimized away */
-        for (int j = 0; j < g_conf_load_loops; ++j)
+        /*
+         * Ensure dummy workload is not optimized away
+         */
+        for (j = 0; j < g_conf_load_loops; ++j)
             asm volatile("nop" : : : "memory");
 
         spin_unlock(ctx->spinlock);
@@ -34,14 +38,16 @@ void *task_spinlock(void *arg)
 void *task_mutex(void *arg)
 {
     struct thread_ctx *ctx = (struct thread_ctx *)arg;
+    int i, j;
+
     if (!ctx)
         return NULL;
 
-    for (int i = 0; i < g_conf_iterations; ++i) {
+    for (i = 0; i < g_conf_iterations; ++i) {
         pthread_mutex_lock(ctx->mutex);
         ++(*ctx->shared_counter);
 
-        for (int j = 0; j < g_conf_load_loops; ++j)
+        for (j = 0; j < g_conf_load_loops; ++j)
             asm volatile("nop" : : : "memory");
 
         pthread_mutex_unlock(ctx->mutex);

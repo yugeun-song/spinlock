@@ -40,7 +40,7 @@ threads_range = sorted(list(set(threads_list)))
 
 # Workload Intensity (Mock NOP)
 workload_range = [0, 500, 2000, 5000]
-REPEATS = 5 
+REPEATS = 5
 START_TIME = time.time()
 
 # ==========================================
@@ -59,7 +59,7 @@ def remove_outliers_iqr(data):
 def run_bench(threads, workload):
     raw_spin, raw_mutex = [], []
     iterations = 1000000 if workload < 1000 else 400000
-    
+
     for _ in range(REPEATS):
         cmd = f"./bin/spinlock_test -t {threads} -l {workload} -i {iterations}"
         try:
@@ -94,12 +94,12 @@ for i, workload_count in enumerate(workload_range):
         results_spin[i, j], results_mutex[i, j] = st, mt
         ratio = mt / st if st > 0 else 0.0
         results_ratio[i, j] = ratio
-        
+
         total_raw_cycles += (actual_iters * REPEATS * t)
         report_data.append({
             'workload': workload_count, 't': t, 'st': st, 'mt': mt, 'ratio': ratio, 'iters': actual_iters
         })
-        
+
         current_step += 1
         progress = (current_step / total_steps) * 100
         sys.stdout.write(f"\rProgress: [{'=' * int(progress // 2):<50}] {progress:.1f}% ({workload_count} NOPs, {t} Threads)")

@@ -112,4 +112,4 @@ static inline void spin_unlock(spinlock_t *lock)
     lock->is_locked = IS_SPINLOCK_UNLOCKED;
 }
 
-#endif /* SPINLOCK_H */
+#endif

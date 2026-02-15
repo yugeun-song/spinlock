@@ -23,4 +23,4 @@ double calc_time_diff_ms(struct timespec *start, struct timespec *end);
 void *task_spinlock(void *arg);
 void *task_mutex(void *arg);
 
-#endif /* SPINLOCK_TEST_H */
+#endif

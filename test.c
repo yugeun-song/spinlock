@@ -40,7 +40,7 @@ static void detect_system_topology(void)
     }
 }
 
-static void print_help(const char *prog_name)
+static inline void print_help(const char *prog_name)
 {
     fprintf(stderr,
         "Usage: %s [options]\n"
@@ -94,7 +94,7 @@ static void parse_args(int argc, char *argv[])
 
     opterr = 0;
 
-    for (i = 1; i < argc; i++) {
+    for (i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0) {
             if (argc > 2) {
                 fprintf(stderr, "Error: -h cannot be combined with other options.\n");
