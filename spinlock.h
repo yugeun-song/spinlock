@@ -36,8 +36,9 @@ typedef struct {
 
 static inline void spin_init(spinlock_t *lock)
 {
-    if (!lock)
+    if (!lock) {
         return;
+    }
     lock->is_locked = IS_SPINLOCK_UNLOCKED;
 }
 
@@ -46,9 +47,11 @@ static inline void spin_lock(spinlock_t *lock)
     int expected;
     int desired = IS_SPINLOCK_LOCKED;
     int backoff = g_conf_spin_min;
+    int i;
 
-    if (!lock)
+    if (!lock) {
         return;
+    }
 
     while (1) {
         /*
@@ -57,8 +60,9 @@ static inline void spin_lock(spinlock_t *lock)
          * on the bus. We only proceed to the atomic "Set" phase when
          * we observe the lock is likely free (is_locked == 0).
          */
-        while (__builtin_expect(lock->is_locked, IS_SPINLOCK_LOCKED) == desired)
+        while (__builtin_expect(lock->is_locked, IS_SPINLOCK_LOCKED) == desired) {
             asm volatile("pause" ::: "memory");
+        }
 
         /*
          * CRITICAL: Reset 'expected' to 0 for every attempt.
@@ -83,11 +87,13 @@ static inline void spin_lock(spinlock_t *lock)
          * If expected is still 0, we won the race and successfully
          * flipped the bit from 0 to 1.
          */
-        if (expected == IS_SPINLOCK_UNLOCKED)
+        if (expected == IS_SPINLOCK_UNLOCKED) {
             return;
+        }
 
-        for (int i = 0; i < backoff; ++i)
+        for (i = 0; i < backoff; ++i) {
             asm volatile("pause" ::: "memory");
+        }
 
         backoff *= 2;
         if (backoff > g_conf_spin_max) {
@@ -99,8 +105,9 @@ static inline void spin_lock(spinlock_t *lock)
 
 static inline void spin_unlock(spinlock_t *lock)
 {
-    if (!lock)
+    if (!lock) {
         return;
+    }
 
     /*
      * It prevents the compiler from moving any memory operations from

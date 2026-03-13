@@ -28,8 +28,9 @@ long g_sys_cache_line_size = 0;
 static void detect_system_topology(void)
 {
     g_sys_cache_line_size = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
-    if (g_sys_cache_line_size <= 0)
+    if (g_sys_cache_line_size <= 0) {
         g_sys_cache_line_size = 64;
+    }
 
     if (g_sys_cache_line_size != COMPILE_TIME_CACHE_LINE_SIZE) {
         fprintf(stderr,
@@ -43,20 +44,20 @@ static void detect_system_topology(void)
 static inline void print_help(const char *prog_name)
 {
     fprintf(stderr,
-        "Usage: %s [options]\n"
-        "Options:\n"
-        "  -t <threads>    Number of threads (Range: %d-%d, default: %d)\n"
-        "  -i <iters>      Iterations per thread (Range: %d-%d, default: %d)\n"
-        "  -l <loops>      Dummy Task Count (Mock NOP) (Range: %d-%d, default: %d)\n"
-        "  -m <min_spin>   Min spin backoff (Range: %d-%d, default: %d)\n"
-        "  -M <max_spin>   Max spin backoff (Range: %d-%d, default: %d)\n"
-        "  -h              Show this help and exit\n",
-        prog_name,
-        MIN_THREADS, MAX_THREADS, DEFAULT_NTHREADS,
-        MIN_ITERS, MAX_ITERS, DEFAULT_ITERATIONS,
-        MIN_LOAD, MAX_LOAD, DEFAULT_LOAD_LOOPS,
-        MIN_BACKOFF, MAX_BACKOFF, DEFAULT_SPIN_MIN,
-        MIN_BACKOFF, MAX_BACKOFF, DEFAULT_SPIN_MAX);
+            "Usage: %s [options]\n"
+            "Options:\n"
+            "  -t <threads>    Number of threads (Range: %d-%d, default: %d)\n"
+            "  -i <iters>      Iterations per thread (Range: %d-%d, default: %d)\n"
+            "  -l <loops>      Dummy Task Count (Mock NOP) (Range: %d-%d, default: %d)\n"
+            "  -m <min_spin>   Min spin backoff (Range: %d-%d, default: %d)\n"
+            "  -M <max_spin>   Max spin backoff (Range: %d-%d, default: %d)\n"
+            "  -h              Show this help and exit\n",
+            prog_name,
+            MIN_THREADS, MAX_THREADS, DEFAULT_NTHREADS,
+            MIN_ITERS, MAX_ITERS, DEFAULT_ITERATIONS,
+            MIN_LOAD, MAX_LOAD, DEFAULT_LOAD_LOOPS,
+            MIN_BACKOFF, MAX_BACKOFF, DEFAULT_SPIN_MIN,
+            MIN_BACKOFF, MAX_BACKOFF, DEFAULT_SPIN_MAX);
 }
 
 static int safe_strtoi(const char *str, int min, int max, const char *name)
@@ -80,7 +81,7 @@ static int safe_strtoi(const char *str, int min, int max, const char *name)
 
     if (val < min || val > max) {
         fprintf(stderr, "Error: %s must be between %d and %d. Got: %ld\n",
-            name, min, max, val);
+                name, min, max, val);
         exit(EXIT_FAILURE);
     }
 
@@ -138,7 +139,7 @@ static void parse_args(int argc, char *argv[])
 
     if (g_conf_spin_max < g_conf_spin_min) {
         fprintf(stderr, "Error: Max spin backoff (%d) < Min spin backoff (%d)\n",
-            g_conf_spin_max, g_conf_spin_min);
+                g_conf_spin_max, g_conf_spin_min);
         exit(EXIT_FAILURE);
     }
 
@@ -183,14 +184,16 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
         ret = pthread_create(&threads[i], NULL, task_routine, &ctx);
         if (ret != 0) {
             fprintf(stderr, "Error: pthread_create failed at index %d: %s\n", i, strerror(ret));
-            while (--i >= 0)
+            while (--i >= 0) {
                 pthread_join(threads[i], NULL);
+            }
             goto err_free;
         }
     }
 
-    for (i = 0; i < g_conf_nthreads; ++i)
+    for (i = 0; i < g_conf_nthreads; ++i) {
         pthread_join(threads[i], NULL);
+    }
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     elapsed_ms = calc_time_diff_ms(&start, &end);
