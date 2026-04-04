@@ -21,13 +21,12 @@ void *task_spinlock(void *arg)
         return NULL;
     }
 
+    pthread_barrier_wait(ctx->barrier);
+
     for (i = 0; i < g_conf_iterations; ++i) {
         spin_lock(ctx->spinlock);
         ++(*ctx->shared_counter);
 
-        /*
-         * Ensure dummy workload is not optimized away
-         */
         for (j = 0; j < g_conf_load_loops; ++j) {
             asm volatile("nop" : : : "memory");
         }
@@ -46,13 +45,11 @@ void *task_mutex(void *arg)
         return NULL;
     }
 
+    pthread_barrier_wait(ctx->barrier);
+
     for (i = 0; i < g_conf_iterations; ++i) {
         pthread_mutex_lock(ctx->mutex);
         ++(*ctx->shared_counter);
-
-        /*
-         * Ensure dummy workload is not optimized away
-         */
 
         for (j = 0; j < g_conf_load_loops; ++j) {
             asm volatile("nop" : : : "memory");

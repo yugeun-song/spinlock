@@ -49,8 +49,7 @@ static inline void print_help(const char *prog_name)
             "Options:\n"
             "  -t <threads>    Number of threads (Range: %d-%d, default: %d)\n"
             "  -i <iters>      Iterations per thread (Range: %d-%d, default: %d)\n"
-            "  -l <loops>      Dummy Task Count (Mock NOP) (Range: %d-%d, default: "
-            "%d)\n"
+            "  -l <loops>      Dummy Task Count (Mock NOP) (Range: %d-%d, default: %d)\n"
             "  -m <min_spin>   Min spin backoff (Range: %d-%d, default: %d)\n"
             "  -M <max_spin>   Max spin backoff (Range: %d-%d, default: %d)\n"
             "  -h              Show this help and exit\n",
@@ -151,41 +150,49 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
     pthread_t *threads = NULL;
     pthread_mutex_t local_mutex;
     spinlock_t local_spinlock;
+    pthread_barrier_t barrier;
     struct thread_ctx ctx;
     struct timespec start, end;
-    int local_counter = 0;
+    long long local_counter = 0;
+    long long expected;
     int i, ret;
     double elapsed_ms;
-    long long expected;
 
     spin_init(&local_spinlock);
     if (pthread_mutex_init(&local_mutex, NULL) != 0) {
         perror("pthread_mutex_init");
         exit(EXIT_FAILURE);
     }
+    if (pthread_barrier_init(&barrier, NULL, g_conf_nthreads + 1) != 0) {
+        perror("pthread_barrier_init");
+        pthread_mutex_destroy(&local_mutex);
+        exit(EXIT_FAILURE);
+    }
 
     ctx.shared_counter = &local_counter;
     ctx.spinlock = &local_spinlock;
     ctx.mutex = &local_mutex;
+    ctx.barrier = &barrier;
 
     threads = malloc(sizeof(pthread_t) * g_conf_nthreads);
     if (!threads) {
         perror("malloc");
-        goto err_mutex;
+        pthread_barrier_destroy(&barrier);
+        pthread_mutex_destroy(&local_mutex);
+        exit(EXIT_FAILURE);
     }
-
-    clock_gettime(CLOCK_MONOTONIC, &start);
 
     for (i = 0; i < g_conf_nthreads; ++i) {
         ret = pthread_create(&threads[i], NULL, task_routine, &ctx);
         if (ret != 0) {
             fprintf(stderr, "Error: pthread_create failed at index %d: %s\n", i, strerror(ret));
-            while (--i >= 0) {
-                pthread_join(threads[i], NULL);
-            }
-            goto err_free;
+            free(threads);
+            exit(EXIT_FAILURE);
         }
     }
+
+    pthread_barrier_wait(&barrier);
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
     for (i = 0; i < g_conf_nthreads; ++i) {
         pthread_join(threads[i], NULL);
@@ -197,18 +204,64 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
 
     printf("[ %-22s ]\n"
            "  - Elapsed Time : %10.3f ms\n"
-           "  - Atomic Count : %10d / %lld (%s)\n",
+           "  - Atomic Count : %10lld / %lld (%s)\n",
            name, elapsed_ms, local_counter, expected, (local_counter == expected) ? "OK" : "FAIL");
 
+    pthread_barrier_destroy(&barrier);
     pthread_mutex_destroy(&local_mutex);
     free(threads);
     return elapsed_ms;
+}
 
-err_free:
-    free(threads);
-err_mutex:
+static void run_warmup(void)
+{
+    pthread_t *threads = NULL;
+    pthread_mutex_t local_mutex;
+    spinlock_t local_spinlock;
+    pthread_barrier_t barrier;
+    struct thread_ctx ctx;
+    long long local_counter = 0;
+    int saved_iters = g_conf_iterations;
+    int i;
+
+    g_conf_iterations = saved_iters / 10 > 0 ? saved_iters / 10 : 1;
+
+    spin_init(&local_spinlock);
+    pthread_mutex_init(&local_mutex, NULL);
+    pthread_barrier_init(&barrier, NULL, g_conf_nthreads + 1);
+
+    ctx.shared_counter = &local_counter;
+    ctx.spinlock = &local_spinlock;
+    ctx.mutex = &local_mutex;
+    ctx.barrier = &barrier;
+
+    threads = malloc(sizeof(pthread_t) * g_conf_nthreads);
+    if (!threads) {
+        g_conf_iterations = saved_iters;
+        pthread_barrier_destroy(&barrier);
+        pthread_mutex_destroy(&local_mutex);
+        return;
+    }
+
+    for (i = 0; i < g_conf_nthreads; ++i) {
+        if (pthread_create(&threads[i], NULL, task_spinlock, &ctx) != 0) {
+            free(threads);
+            g_conf_iterations = saved_iters;
+            pthread_barrier_destroy(&barrier);
+            pthread_mutex_destroy(&local_mutex);
+            return;
+        }
+    }
+
+    pthread_barrier_wait(&barrier);
+    for (i = 0; i < g_conf_nthreads; ++i) {
+        pthread_join(threads[i], NULL);
+    }
+
+    pthread_barrier_destroy(&barrier);
     pthread_mutex_destroy(&local_mutex);
-    exit(EXIT_FAILURE);
+    free(threads);
+    g_conf_iterations = saved_iters;
 }
 
 int main(int argc, char *argv[])
@@ -231,6 +284,8 @@ int main(int argc, char *argv[])
            "--------------------------------------\n\n",
            g_sys_cache_line_size, g_conf_nthreads, g_conf_iterations, g_conf_load_loops,
            g_conf_spin_min, g_conf_spin_max);
+
+    run_warmup();
 
     t_spin = run_benchmark("Custom Hybrid Spinlock", task_spinlock);
     printf("\n");

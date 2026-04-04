@@ -14,9 +14,10 @@ extern int g_conf_load_loops;
 extern int g_conf_nthreads;
 
 struct thread_ctx {
-    int *shared_counter;
+    long long *shared_counter;
     spinlock_t *spinlock;
     pthread_mutex_t *mutex;
+    pthread_barrier_t *barrier;
 };
 
 double calc_time_diff_ms(struct timespec *start, struct timespec *end);
