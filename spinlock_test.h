@@ -1,6 +1,9 @@
 #ifndef SPINLOCK_TEST_H
 #define SPINLOCK_TEST_H
 
+#include <pthread.h>
+#include <time.h>
+
 #include "./spinlock.h"
 
 #define DEFAULT_ITERATIONS 1000000

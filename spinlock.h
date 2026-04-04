@@ -1,12 +1,7 @@
 #ifndef SPINLOCK_H
 #define SPINLOCK_H
 
-#include <pthread.h>
 #include <sched.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <unistd.h>
 
 /*
  * Cache line size for modern x86_64 processors to prevent "False Sharing".
