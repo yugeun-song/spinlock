@@ -5,11 +5,37 @@
 *.o
 spinlock_test
 
-# Ignore GDB history and debug files
-.gdb_history
-gdb.txt
-core.*
-
-# Ignore any potential shared library files
+# Ignore shared library files
 *.so
 *.a
+
+# GDB / pwndbg artifacts
+core
+core.*
+gdb.txt
+.gdb_history
+peda-session-*.txt
+
+# Valgrind artifacts
+vgcore.*
+callgrind.out.*
+cachegrind.out.*
+massif.out.*
+helgrind.out.*
+
+# strace, ltrace, uftrace artifacts
+strace.out
+strace.log
+*.strace
+ltrace.out
+ltrace.log
+*.ltrace
+uftrace.data/
+
+# LSP / Editor artifacts
+compile_commands.json
+.cache/
+
+# AI Tool Artifacts
+.claude/
+CLAUDE.md

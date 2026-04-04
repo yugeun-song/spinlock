@@ -9,7 +9,7 @@ double calc_time_diff_ms(struct timespec *start, struct timespec *end)
     }
 
     elapsed_ns = (end->tv_sec - start->tv_sec) * 1000000000LL +
-             (end->tv_nsec - start->tv_nsec);
+                 (end->tv_nsec - start->tv_nsec);
     return (double)elapsed_ns / 1000000.0;
 }
 

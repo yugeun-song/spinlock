@@ -3,11 +3,11 @@
 
 #include "./spinlock.h"
 
-#define DEFAULT_ITERATIONS  1000000
-#define DEFAULT_LOAD_LOOPS  500
-#define DEFAULT_NTHREADS    4
-#define DEFAULT_SPIN_MIN    4
-#define DEFAULT_SPIN_MAX    16000
+#define DEFAULT_ITERATIONS 1000000
+#define DEFAULT_LOAD_LOOPS 500
+#define DEFAULT_NTHREADS 4
+#define DEFAULT_SPIN_MIN 4
+#define DEFAULT_SPIN_MAX 16000
 
 extern int g_conf_iterations;
 extern int g_conf_load_loops;

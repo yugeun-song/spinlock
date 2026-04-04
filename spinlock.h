@@ -31,7 +31,8 @@ typedef struct {
      * causing CPU cores to fight for ownership (MESI protocol) even if they
      * access different locks.
      */
-    char x64_aligned_padding[COMPILE_TIME_CACHE_LINE_SIZE - sizeof(spinlock_val_t)];
+    char x64_aligned_padding[COMPILE_TIME_CACHE_LINE_SIZE -
+                             sizeof(spinlock_val_t)];
 } __attribute__((aligned(COMPILE_TIME_CACHE_LINE_SIZE))) spinlock_t;
 
 static inline void spin_init(spinlock_t *lock)
@@ -60,7 +61,8 @@ static inline void spin_lock(spinlock_t *lock)
          * on the bus. We only proceed to the atomic "Set" phase when
          * we observe the lock is likely free (is_locked == 0).
          */
-        while (__builtin_expect(lock->is_locked, IS_SPINLOCK_LOCKED) == desired) {
+        while (__builtin_expect(lock->is_locked, IS_SPINLOCK_LOCKED) ==
+               desired) {
             asm volatile("pause" ::: "memory");
         }
 
@@ -79,9 +81,9 @@ static inline void spin_lock(spinlock_t *lock)
          * - FAILURE: memory != EAX(0). EAX becomes 1 (loads memory).
          */
         asm volatile("lock cmpxchgl %2, %1"
-                 : "+a"(expected), "+m"(lock->is_locked)
-                 : "r"(desired)
-                 : "memory");
+                     : "+a"(expected), "+m"(lock->is_locked)
+                     : "r"(desired)
+                     : "memory");
 
         /*
          * If expected is still 0, we won the race and successfully
