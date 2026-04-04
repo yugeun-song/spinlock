@@ -6,6 +6,8 @@ This project provides a custom spinlock implementation using x86-64 inline assem
 - **Architecture**: x86-64 (Required for `pause` and `lock cmpxchgl` instructions)
 - **OS**: Linux
 - **Compiler**: GCC (Standard: `gnu99`)
+- **CFLAGS**: `-O3 -Wall -Wextra -fno-omit-frame-pointer -fasynchronous-unwind-tables` — optimized for benchmarking while preserving frame pointers and unwind tables for `perf` / flame graph analysis.
+- **Code Style**: LLVM-based `.clang-format` — right-aligned pointers, Allman function braces, K&R control flow, 80-column limit.
 
 ## Build Instructions
 
