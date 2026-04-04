@@ -44,21 +44,19 @@ static void detect_system_topology(void)
 
 static inline void print_help(const char *prog_name)
 {
-    fprintf(
-        stderr,
-        "Usage: %s [options]\n"
-        "Options:\n"
-        "  -t <threads>    Number of threads (Range: %d-%d, default: %d)\n"
-        "  -i <iters>      Iterations per thread (Range: %d-%d, default: %d)\n"
-        "  -l <loops>      Dummy Task Count (Mock NOP) (Range: %d-%d, default: "
-        "%d)\n"
-        "  -m <min_spin>   Min spin backoff (Range: %d-%d, default: %d)\n"
-        "  -M <max_spin>   Max spin backoff (Range: %d-%d, default: %d)\n"
-        "  -h              Show this help and exit\n",
-        prog_name, MIN_THREADS, MAX_THREADS, DEFAULT_NTHREADS, MIN_ITERS,
-        MAX_ITERS, DEFAULT_ITERATIONS, MIN_LOAD, MAX_LOAD, DEFAULT_LOAD_LOOPS,
-        MIN_BACKOFF, MAX_BACKOFF, DEFAULT_SPIN_MIN, MIN_BACKOFF, MAX_BACKOFF,
-        DEFAULT_SPIN_MAX);
+    fprintf(stderr,
+            "Usage: %s [options]\n"
+            "Options:\n"
+            "  -t <threads>    Number of threads (Range: %d-%d, default: %d)\n"
+            "  -i <iters>      Iterations per thread (Range: %d-%d, default: %d)\n"
+            "  -l <loops>      Dummy Task Count (Mock NOP) (Range: %d-%d, default: "
+            "%d)\n"
+            "  -m <min_spin>   Min spin backoff (Range: %d-%d, default: %d)\n"
+            "  -M <max_spin>   Max spin backoff (Range: %d-%d, default: %d)\n"
+            "  -h              Show this help and exit\n",
+            prog_name, MIN_THREADS, MAX_THREADS, DEFAULT_NTHREADS, MIN_ITERS, MAX_ITERS,
+            DEFAULT_ITERATIONS, MIN_LOAD, MAX_LOAD, DEFAULT_LOAD_LOOPS, MIN_BACKOFF, MAX_BACKOFF,
+            DEFAULT_SPIN_MIN, MIN_BACKOFF, MAX_BACKOFF, DEFAULT_SPIN_MAX);
 }
 
 static int safe_strtoi(const char *str, int min, int max, const char *name)
@@ -69,8 +67,7 @@ static int safe_strtoi(const char *str, int min, int max, const char *name)
     errno = 0;
     val = strtol(str, &endptr, 10);
 
-    if ((errno == ERANGE && (val == LONG_MAX || val == LONG_MIN)) ||
-        (errno != 0 && val == 0)) {
+    if ((errno == ERANGE && (val == LONG_MAX || val == LONG_MIN)) || (errno != 0 && val == 0)) {
         perror("strtol");
         exit(EXIT_FAILURE);
     }
@@ -81,8 +78,7 @@ static int safe_strtoi(const char *str, int min, int max, const char *name)
     }
 
     if (val < min || val > max) {
-        fprintf(stderr, "Error: %s must be between %d and %d. Got: %ld\n", name,
-                min, max, val);
+        fprintf(stderr, "Error: %s must be between %d and %d. Got: %ld\n", name, min, max, val);
         exit(EXIT_FAILURE);
     }
 
@@ -99,8 +95,7 @@ static void parse_args(int argc, char *argv[])
     for (i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0) {
             if (argc > 2) {
-                fprintf(stderr,
-                        "Error: -h cannot be combined with other options.\n");
+                fprintf(stderr, "Error: -h cannot be combined with other options.\n");
                 print_help(argv[0]);
                 exit(EXIT_FAILURE);
             }
@@ -112,30 +107,23 @@ static void parse_args(int argc, char *argv[])
     while ((opt = getopt(argc, argv, "+t:i:l:m:M:")) != -1) {
         switch (opt) {
         case 't':
-            g_conf_nthreads =
-                safe_strtoi(optarg, MIN_THREADS, MAX_THREADS, "threads");
+            g_conf_nthreads = safe_strtoi(optarg, MIN_THREADS, MAX_THREADS, "threads");
             break;
         case 'i':
-            g_conf_iterations =
-                safe_strtoi(optarg, MIN_ITERS, MAX_ITERS, "iterations");
+            g_conf_iterations = safe_strtoi(optarg, MIN_ITERS, MAX_ITERS, "iterations");
             break;
         case 'l':
-            g_conf_load_loops =
-                safe_strtoi(optarg, MIN_LOAD, MAX_LOAD, "load_loops");
+            g_conf_load_loops = safe_strtoi(optarg, MIN_LOAD, MAX_LOAD, "load_loops");
             break;
         case 'm':
-            g_conf_spin_min =
-                safe_strtoi(optarg, MIN_BACKOFF, MAX_BACKOFF, "spin_min");
+            g_conf_spin_min = safe_strtoi(optarg, MIN_BACKOFF, MAX_BACKOFF, "spin_min");
             break;
         case 'M':
-            g_conf_spin_max =
-                safe_strtoi(optarg, MIN_BACKOFF, MAX_BACKOFF, "spin_max");
+            g_conf_spin_max = safe_strtoi(optarg, MIN_BACKOFF, MAX_BACKOFF, "spin_max");
             break;
         case '?':
-            if (optopt == 't' || optopt == 'i' || optopt == 'l' ||
-                optopt == 'm' || optopt == 'M') {
-                fprintf(stderr, "Error: Option '-%c' requires an argument.\n",
-                        optopt);
+            if (optopt == 't' || optopt == 'i' || optopt == 'l' || optopt == 'm' || optopt == 'M') {
+                fprintf(stderr, "Error: Option '-%c' requires an argument.\n", optopt);
             } else {
                 fprintf(stderr, "Error: Unknown option '-%c'.\n", optopt);
             }
@@ -147,15 +135,12 @@ static void parse_args(int argc, char *argv[])
     }
 
     if (g_conf_spin_max < g_conf_spin_min) {
-        fprintf(stderr,
-                "Error: Max spin backoff (%d) < Min spin backoff (%d)\n",
-                g_conf_spin_max, g_conf_spin_min);
+        fprintf(stderr, "Error: Max spin backoff (%d) < Min spin backoff (%d)\n", g_conf_spin_max, g_conf_spin_min);
         exit(EXIT_FAILURE);
     }
 
     if (optind < argc) {
-        fprintf(stderr, "Error: Unexpected positional argument '%s'\n",
-                argv[optind]);
+        fprintf(stderr, "Error: Unexpected positional argument '%s'\n", argv[optind]);
         print_help(argv[0]);
         exit(EXIT_FAILURE);
     }
@@ -194,8 +179,7 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
     for (i = 0; i < g_conf_nthreads; ++i) {
         ret = pthread_create(&threads[i], NULL, task_routine, &ctx);
         if (ret != 0) {
-            fprintf(stderr, "Error: pthread_create failed at index %d: %s\n", i,
-                    strerror(ret));
+            fprintf(stderr, "Error: pthread_create failed at index %d: %s\n", i, strerror(ret));
             while (--i >= 0) {
                 pthread_join(threads[i], NULL);
             }
@@ -214,8 +198,7 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
     printf("[ %-22s ]\n"
            "  - Elapsed Time : %10.3f ms\n"
            "  - Atomic Count : %10d / %lld (%s)\n",
-           name, elapsed_ms, local_counter, expected,
-           (local_counter == expected) ? "OK" : "FAIL");
+           name, elapsed_ms, local_counter, expected, (local_counter == expected) ? "OK" : "FAIL");
 
     pthread_mutex_destroy(&local_mutex);
     free(threads);
@@ -246,8 +229,8 @@ int main(int argc, char *argv[])
            "  Dummy Tasks    : %d\n"
            "  Backoff Range  : %d ~ %d\n"
            "--------------------------------------\n\n",
-           g_sys_cache_line_size, g_conf_nthreads, g_conf_iterations,
-           g_conf_load_loops, g_conf_spin_min, g_conf_spin_max);
+           g_sys_cache_line_size, g_conf_nthreads, g_conf_iterations, g_conf_load_loops,
+           g_conf_spin_min, g_conf_spin_max);
 
     t_spin = run_benchmark("Custom Hybrid Spinlock", task_spinlock);
     printf("\n");
@@ -258,8 +241,7 @@ int main(int argc, char *argv[])
            "  Speedup Factor : %.2fx\n"
            "  Winner         : %s\n"
            "--- BENCHMARK SUITE END ---\n\n",
-           t_mutex / t_spin,
-           (t_spin < t_mutex) ? "Custom Spinlock" : "POSIX Mutex");
+           t_mutex / t_spin, (t_spin < t_mutex) ? "Custom Spinlock" : "POSIX Mutex");
 
     return EXIT_SUCCESS;
 }

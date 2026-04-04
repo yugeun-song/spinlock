@@ -21,5 +21,6 @@ AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: None
 PointerAlignment: Right
-ColumnLimit: 80
+ColumnLimit: 100
+PenaltyExcessCharacter: 1
 SortIncludes: false
