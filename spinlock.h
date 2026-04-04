@@ -39,9 +39,10 @@ static inline void spin_init(spinlock_t *lock)
 
 static inline void spin_lock(spinlock_t *lock)
 {
-    int expected;
-    int desired = IS_SPINLOCK_LOCKED;
+    int spin_max = g_conf_spin_max;
     int backoff = g_conf_spin_min;
+    int desired = IS_SPINLOCK_LOCKED;
+    int expected;
     int i;
 
     if (!lock) {
@@ -91,8 +92,8 @@ static inline void spin_lock(spinlock_t *lock)
         }
 
         backoff *= 2;
-        if (backoff > g_conf_spin_max) {
-            backoff = g_conf_spin_max;
+        if (backoff > spin_max) {
+            backoff = spin_max;
             sched_yield();
         }
     }

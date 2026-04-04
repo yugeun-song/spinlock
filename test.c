@@ -15,8 +15,8 @@
 #define MAX_ITERS INT_MAX
 #define MIN_LOAD 0
 #define MAX_LOAD INT_MAX
-#define MIN_BACKOFF 0
-#define MAX_BACKOFF INT_MAX
+#define MIN_BACKOFF 1
+#define MAX_BACKOFF (INT_MAX / 2)
 
 int g_conf_iterations = DEFAULT_ITERATIONS;
 int g_conf_load_loops = DEFAULT_LOAD_LOOPS;
