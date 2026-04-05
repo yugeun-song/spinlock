@@ -15,6 +15,11 @@ WORKLOAD_RANGE = [0, 500, 2000, 5000]
 BENCHMARK_BIN = "./bin/spinlock_test"
 
 
+def mad(arr):
+    med = np.median(arr)
+    return np.median(np.abs(arr - med)) * 1.4826
+
+
 def get_cpu_model():
     try:
         with open("/proc/cpuinfo", "r") as f:
@@ -59,14 +64,15 @@ def run_bench(threads, workload):
     for _ in range(REPEATS):
         cmd = [BENCHMARK_BIN, "-t", str(threads), "-l", str(workload), "-i", str(iterations)]
         try:
-            res = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode()
+            res = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=120).decode()
+        except subprocess.TimeoutExpired:
+            print(f"\nWarning: benchmark timed out (threads={threads}, workload={workload})",
+                  file=sys.stderr)
+            continue
         except subprocess.CalledProcessError as e:
             print(f"\nWarning: benchmark failed (threads={threads}, workload={workload}): {e}",
                   file=sys.stderr)
             continue
-        except FileNotFoundError:
-            print(f"\nError: {BENCHMARK_BIN} not found. Run 'make' first.", file=sys.stderr)
-            sys.exit(1)
 
         s_m = re.search(r"Custom Hybrid Spinlock \]\s+- Elapsed Time :\s+([\d.]+)", res)
         m_m = re.search(r"POSIX Mutex\s+\]\s+- Elapsed Time :\s+([\d.]+)", res)
@@ -79,7 +85,7 @@ def run_bench(threads, workload):
         return 0.0, 0.0, 0.0, 0.0, iterations
 
     return (np.median(raw_spin), np.median(raw_mutex),
-            np.std(raw_spin), np.std(raw_mutex), iterations)
+            mad(raw_spin), mad(raw_mutex), iterations)
 
 
 def print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
@@ -96,7 +102,7 @@ def print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
     print(f"  - L1 Cache Line   : {l1_cache} bytes")
     print(line)
     print(f"TEST PARAMETERS:")
-    print(f"  - Aggregation     : Median of {REPEATS} runs")
+    print(f"  - Aggregation     : Median \u00b1 MAD of {REPEATS} runs")
     print(f"  - Normalization   : 1,000,000 Lock/Unlock cycles")
     print(f"  - Total Raw Ops   : {total_raw_cycles:,} cycles performed")
     print(f"  - Bench Duration  : {duration:.2f} seconds")
@@ -106,24 +112,24 @@ def print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
     print(line)
 
     for d in report_data:
-        spin_str = f"{d['spin_med']:.3f} \u00b1{d['spin_std']:.1f}"
-        mutex_str = f"{d['mutex_med']:.3f} \u00b1{d['mutex_std']:.1f}"
+        spin_str = f"{d['spin_med']:.3f} \u00b1{d['spin_mad']:.1f}"
+        mutex_str = f"{d['mutex_med']:.3f} \u00b1{d['mutex_mad']:.1f}"
         print(f"{d['workload']:<20} | {d['t']:<8} | {d['iters']:<10} | "
               f"{spin_str:<20} | {mutex_str:<20} | {d['ratio']:.2f}x")
         if d['t'] == threads_range[-1]:
             print(line)
 
 
-def plot_results(results_spin, results_mutex, results_spin_std, results_mutex_std,
+def plot_results(results_spin, results_mutex, results_spin_mad, results_mutex_mad,
                  results_ratio, threads_range, cpu_model):
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 14))
 
     for i, wl in enumerate(WORKLOAD_RANGE):
         c = colors[i % len(colors)]
-        ax1.errorbar(threads_range, results_spin[i, :], yerr=results_spin_std[i, :],
+        ax1.errorbar(threads_range, results_spin[i, :], yerr=results_spin_mad[i, :],
                      label=f'Spin ({wl} NOPs)', color=c, marker='o', lw=2, capsize=3)
-        ax1.errorbar(threads_range, results_mutex[i, :], yerr=results_mutex_std[i, :],
+        ax1.errorbar(threads_range, results_mutex[i, :], yerr=results_mutex_mad[i, :],
                      label=f'Mutex ({wl} NOPs)', color=c, ls='--', marker='x',
                      lw=1.5, alpha=0.7, capsize=3)
 
@@ -150,6 +156,11 @@ def plot_results(results_spin, results_mutex, results_spin_std, results_mutex_st
 
 
 def main():
+    if not os.access(BENCHMARK_BIN, os.X_OK):
+        print(f"Error: {BENCHMARK_BIN} not found or not executable. Run 'make' first.",
+              file=sys.stderr)
+        sys.exit(1)
+
     cpu_model, num_cpus, l1_cache = get_system_info()
     threads_range = build_threads_range(num_cpus)
     start_time = time.time()
@@ -159,8 +170,8 @@ def main():
 
     results_spin = np.zeros((n_wl, n_th))
     results_mutex = np.zeros((n_wl, n_th))
-    results_spin_std = np.zeros((n_wl, n_th))
-    results_mutex_std = np.zeros((n_wl, n_th))
+    results_spin_mad = np.zeros((n_wl, n_th))
+    results_mutex_mad = np.zeros((n_wl, n_th))
     results_ratio = np.zeros((n_wl, n_th))
 
     total_steps = n_wl * n_th
@@ -172,12 +183,12 @@ def main():
 
     for i, wl in enumerate(WORKLOAD_RANGE):
         for j, t in enumerate(threads_range):
-            spin_med, mutex_med, spin_std, mutex_std, iters = run_bench(t, wl)
+            spin_med, mutex_med, spin_mad, mutex_mad, iters = run_bench(t, wl)
 
             results_spin[i, j] = spin_med
             results_mutex[i, j] = mutex_med
-            results_spin_std[i, j] = spin_std
-            results_mutex_std[i, j] = mutex_std
+            results_spin_mad[i, j] = spin_mad
+            results_mutex_mad[i, j] = mutex_mad
             ratio = mutex_med / spin_med if spin_med > 0 else 0.0
             results_ratio[i, j] = ratio
 
@@ -185,7 +196,7 @@ def main():
             report_data.append({
                 'workload': wl, 't': t,
                 'spin_med': spin_med, 'mutex_med': mutex_med,
-                'spin_std': spin_std, 'mutex_std': mutex_std,
+                'spin_mad': spin_mad, 'mutex_mad': mutex_mad,
                 'ratio': ratio, 'iters': iters
             })
 
@@ -200,7 +211,7 @@ def main():
     duration = time.time() - start_time
     print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
                  total_raw_cycles, duration)
-    plot_results(results_spin, results_mutex, results_spin_std, results_mutex_std,
+    plot_results(results_spin, results_mutex, results_spin_mad, results_mutex_mad,
                  results_ratio, threads_range, cpu_model)
 
     print("[Done] Report and plots saved as 'bench_result.png'")
