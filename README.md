@@ -73,22 +73,22 @@ Adjust the exponential backoff parameters to optimize for specific hardware (e.g
 
 | Scenario | Lock Type | Time (ms) | Speedup |
 | :--- | :--- | :--- | :--- |
-| **Short Critical Section** | Pthread Mutex | 368.433 | 1.0x |
-| | **Custom Spinlock** | **73.588** | **5.0x** |
-| **Long Critical Section** | Pthread Mutex | 979.098 | 1.0x |
-| (500 nop loop) | **Custom Spinlock** | **360.128** | **2.7x** |
+| **Short Critical Section** | Pthread Mutex | 372.296 | 1.0x |
+| | **Custom Spinlock** | **49.113** | **7.6x** |
+| **Long Critical Section** | Pthread Mutex | 1,625.701 | 1.0x |
+| (500 nop loop) | **Custom Spinlock** | **622.615** | **2.6x** |
 
 ## Automated Benchmarking & Visualization
 A Python-based automated runner (`test_bench.py`) is provided to analyze performance across various thread counts and workload intensities. It automatically generates a visual report.
 
 ### Real-World Performance (Intel Core Ultra 5 226V)
-*Target System: 4 Cores / 8 Threads, Arch Linux*
+*Target System: 8 Cores / 8 Threads, Arch Linux*
 
 | Workload Intensity (NOPs) | Threads | Spin (ms) | Mutex (ms) | Speedup |
 | :--- | :--- | :--- | :--- | :--- |
-| **0 (Extreme Contention)** | 8 | 98.18 | 903.82 | **9.21x** |
-| **500 (Balanced)** | 4 | 686.60 | 1598.32 | **2.33x** |
-| **2000 (Medium CS)** | 4 | 2391.82 | 3955.45 | **1.65x** |
-| **5000 (Long CS)** | 8 | 12850.83 | 24676.96 | **1.92x** |
+| **0 (Extreme Contention)** | 8 | 99.80 | 859.69 | **8.61x** |
+| **500 (Balanced)** | 4 | 622.62 | 1,625.70 | **2.61x** |
+| **2000 (Medium CS)** | 4 | 2,194.70 | 3,728.65 | **1.70x** |
+| **5000 (Long CS)** | 8 | 12,596.23 | 18,376.78 | **1.46x** |
 
 ![Benchmark Result](bench_result.png)
