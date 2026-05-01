@@ -1,21 +1,19 @@
 #include "./spinlock_test.h"
 
-double calc_time_diff_ms(struct timespec *start, struct timespec *end)
+double calc_time_diff_ms(const struct timespec *start, const struct timespec *end)
 {
-    long long elapsed_ns;
-
     if (!start || !end) {
         return 0.0;
     }
 
-    elapsed_ns = (end->tv_sec - start->tv_sec) * 1000000000LL + (end->tv_nsec - start->tv_nsec);
+    const long long elapsed_ns =
+        (end->tv_sec - start->tv_sec) * 1000000000LL + (end->tv_nsec - start->tv_nsec);
     return (double)elapsed_ns / 1000000.0;
 }
 
 void *task_spinlock(void *arg)
 {
     struct thread_ctx *ctx = (struct thread_ctx *)arg;
-    int i, j;
 
     if (!ctx) {
         return NULL;
@@ -23,11 +21,11 @@ void *task_spinlock(void *arg)
 
     pthread_barrier_wait(ctx->barrier);
 
-    for (i = 0; i < g_conf_iterations; ++i) {
+    for (int i = 0; i < g_conf_iterations; ++i) {
         spin_lock(ctx->spinlock);
         ++(*ctx->shared_counter);
 
-        for (j = 0; j < g_conf_load_loops; ++j) {
+        for (int j = 0; j < g_conf_load_loops; ++j) {
             asm volatile("nop" : : : "memory");
         }
 
@@ -39,7 +37,6 @@ void *task_spinlock(void *arg)
 void *task_mutex(void *arg)
 {
     struct thread_ctx *ctx = (struct thread_ctx *)arg;
-    int i, j;
 
     if (!ctx) {
         return NULL;
@@ -47,11 +44,11 @@ void *task_mutex(void *arg)
 
     pthread_barrier_wait(ctx->barrier);
 
-    for (i = 0; i < g_conf_iterations; ++i) {
+    for (int i = 0; i < g_conf_iterations; ++i) {
         pthread_mutex_lock(ctx->mutex);
         ++(*ctx->shared_counter);
 
-        for (j = 0; j < g_conf_load_loops; ++j) {
+        for (int j = 0; j < g_conf_load_loops; ++j) {
             asm volatile("nop" : : : "memory");
         }
 

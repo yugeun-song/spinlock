@@ -61,10 +61,8 @@ static inline void print_help(const char *prog_name)
 static int safe_strtoi(const char *str, int min, int max, const char *name)
 {
     char *endptr;
-    long val;
-
     errno = 0;
-    val = strtol(str, &endptr, 10);
+    const long val = strtol(str, &endptr, 10);
 
     if ((errno == ERANGE && (val == LONG_MAX || val == LONG_MIN)) || (errno != 0 && val == 0)) {
         perror("strtol");
@@ -86,12 +84,9 @@ static int safe_strtoi(const char *str, int min, int max, const char *name)
 
 static void parse_args(int argc, char *argv[])
 {
-    int opt;
-    int i;
-
     opterr = 0;
 
-    for (i = 1; i < argc; ++i) {
+    for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0) {
             if (argc > 2) {
                 fprintf(stderr, "Error: -h cannot be combined with other options.\n");
@@ -103,6 +98,7 @@ static void parse_args(int argc, char *argv[])
         }
     }
 
+    int opt;
     while ((opt = getopt(argc, argv, "+t:i:l:m:M:")) != -1) {
         switch (opt) {
         case 't':
@@ -147,16 +143,12 @@ static void parse_args(int argc, char *argv[])
 
 static double run_benchmark(const char *name, void *(*task_routine)(void *))
 {
-    pthread_t *threads = NULL;
     pthread_mutex_t local_mutex;
     spinlock_t local_spinlock;
     pthread_barrier_t barrier;
     struct thread_ctx ctx;
     struct timespec start, end;
     long long local_counter = 0;
-    long long expected;
-    int i, ret;
-    double elapsed_ms;
 
     spin_init(&local_spinlock);
     if (pthread_mutex_init(&local_mutex, NULL) != 0) {
@@ -174,16 +166,16 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
     ctx.mutex = &local_mutex;
     ctx.barrier = &barrier;
 
-    threads = malloc(sizeof(pthread_t) * g_conf_nthreads);
+    pthread_t *threads = calloc(g_conf_nthreads, sizeof(*threads));
     if (!threads) {
-        perror("malloc");
+        perror("calloc");
         pthread_barrier_destroy(&barrier);
         pthread_mutex_destroy(&local_mutex);
         exit(EXIT_FAILURE);
     }
 
-    for (i = 0; i < g_conf_nthreads; ++i) {
-        ret = pthread_create(&threads[i], NULL, task_routine, &ctx);
+    for (int i = 0; i < g_conf_nthreads; ++i) {
+        const int ret = pthread_create(&threads[i], NULL, task_routine, &ctx);
         if (ret != 0) {
             fprintf(stderr, "Error: pthread_create failed at index %d: %s\n", i, strerror(ret));
             free(threads);
@@ -194,13 +186,13 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
     pthread_barrier_wait(&barrier);
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    for (i = 0; i < g_conf_nthreads; ++i) {
+    for (int i = 0; i < g_conf_nthreads; ++i) {
         pthread_join(threads[i], NULL);
     }
 
     clock_gettime(CLOCK_MONOTONIC, &end);
-    elapsed_ms = calc_time_diff_ms(&start, &end);
-    expected = (long long)g_conf_iterations * g_conf_nthreads;
+    const double elapsed_ms = calc_time_diff_ms(&start, &end);
+    const long long expected = (long long)g_conf_iterations * g_conf_nthreads;
 
     printf("[ %-22s ]\n"
            "  - Elapsed Time : %10.3f ms\n"
@@ -215,14 +207,12 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
 
 static void run_warmup(void)
 {
-    pthread_t *threads = NULL;
     pthread_mutex_t local_mutex;
     spinlock_t local_spinlock;
     pthread_barrier_t barrier;
     struct thread_ctx ctx;
     long long local_counter = 0;
-    int saved_iters = g_conf_iterations;
-    int i;
+    const int saved_iters = g_conf_iterations;
 
     g_conf_iterations = saved_iters / 10 > 0 ? saved_iters / 10 : 1;
 
@@ -235,7 +225,7 @@ static void run_warmup(void)
     ctx.mutex = &local_mutex;
     ctx.barrier = &barrier;
 
-    threads = malloc(sizeof(pthread_t) * g_conf_nthreads);
+    pthread_t *threads = calloc(g_conf_nthreads, sizeof(*threads));
     if (!threads) {
         g_conf_iterations = saved_iters;
         pthread_barrier_destroy(&barrier);
@@ -243,7 +233,7 @@ static void run_warmup(void)
         return;
     }
 
-    for (i = 0; i < g_conf_nthreads; ++i) {
+    for (int i = 0; i < g_conf_nthreads; ++i) {
         if (pthread_create(&threads[i], NULL, task_spinlock, &ctx) != 0) {
             free(threads);
             g_conf_iterations = saved_iters;
@@ -254,7 +244,7 @@ static void run_warmup(void)
     }
 
     pthread_barrier_wait(&barrier);
-    for (i = 0; i < g_conf_nthreads; ++i) {
+    for (int i = 0; i < g_conf_nthreads; ++i) {
         pthread_join(threads[i], NULL);
     }
 
@@ -266,8 +256,6 @@ static void run_warmup(void)
 
 int main(int argc, char *argv[])
 {
-    double t_spin, t_mutex;
-
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     detect_system_topology();
@@ -287,9 +275,9 @@ int main(int argc, char *argv[])
 
     run_warmup();
 
-    t_spin = run_benchmark("Custom Hybrid Spinlock", task_spinlock);
+    const double t_spin = run_benchmark("Custom Hybrid Spinlock", task_spinlock);
     printf("\n");
-    t_mutex = run_benchmark("POSIX Mutex", task_mutex);
+    const double t_mutex = run_benchmark("POSIX Mutex", task_mutex);
 
     printf("\n--------------------------------------\n"
            "FINAL RESULT:\n"

@@ -23,7 +23,7 @@ struct thread_ctx {
     pthread_barrier_t *barrier;
 };
 
-double calc_time_diff_ms(struct timespec *start, struct timespec *end);
+double calc_time_diff_ms(const struct timespec *start, const struct timespec *end);
 void *task_spinlock(void *arg);
 void *task_mutex(void *arg);
 
