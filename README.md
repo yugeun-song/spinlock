@@ -39,7 +39,7 @@ Run the binary directly from the command line. If no arguments are provided, def
 | `-i` | `<iters>` | **Iterations**: Number of critical section entries per thread. | `1,000,000` |
 | `-l` | `<loops>` | **Workload**: Number of `nop` instructions to execute inside the critical section (simulates load). | `500` |
 | `-m` | `<min>` | **Min Backoff**: Initial spin count for the exponential backoff algorithm. | `4` |
-| `-M` | `<max>` | **Max Backoff**: Maximum spin count before yielding the CPU (`sched_yield`). | `16,000` |
+| `-M` | `<max>` | **Max Backoff**: Maximum spin count before deferring to the scheduler via a bounded `nanosleep`. | `16,000` |
 | `-h` | N/A | **Help**: Display usage information and exit. | N/A |
 
 ### Execution Examples

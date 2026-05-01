@@ -2,7 +2,7 @@ TARGET = spinlock_test
 BIN_DIR = bin
 SRCS = spinlock_test.c test.c
 CC = gcc
-CFLAGS = -O3 -Wall -Wextra -std=gnu99 -fno-omit-frame-pointer -fasynchronous-unwind-tables
+CFLAGS = -O3 -Wall -Wextra -std=gnu17 -fno-omit-frame-pointer -fasynchronous-unwind-tables
 LDLIBS = -pthread -lrt
 
 .PHONY: all clean

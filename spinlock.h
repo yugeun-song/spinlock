@@ -1,7 +1,8 @@
 #ifndef SPINLOCK_H
 #define SPINLOCK_H
 
-#include <sched.h>
+#include <time.h>
+#include <immintrin.h>
 
 /*
  * Cache line size for modern x86_64 processors to prevent "False Sharing".
@@ -57,7 +58,7 @@ static inline void spin_lock(spinlock_t *lock)
          * we observe the lock is likely free (is_locked == 0).
          */
         while (__builtin_expect(lock->is_locked, IS_SPINLOCK_LOCKED) == desired) {
-            asm volatile("pause" ::: "memory");
+            _mm_pause();
         }
 
         /*
@@ -88,13 +89,13 @@ static inline void spin_lock(spinlock_t *lock)
         }
 
         for (i = 0; i < backoff; ++i) {
-            asm volatile("pause" ::: "memory");
+            _mm_pause();
         }
 
         backoff *= 2;
         if (backoff > spin_max) {
             backoff = spin_max;
-            sched_yield();
+            nanosleep(&(const struct timespec){.tv_sec = 0, .tv_nsec = 1000}, NULL);
         }
     }
 }
