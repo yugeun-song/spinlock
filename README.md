@@ -5,23 +5,43 @@ This project provides a custom spinlock implementation using x86-64 inline assem
 ## Supported Platforms
 - **Architecture**: x86-64 (Required for `pause` and `lock cmpxchgl` instructions)
 - **OS**: Linux
-- **Compiler**: GCC (Standard: `gnu99`)
-- **CFLAGS**: `-O3 -Wall -Wextra -fno-omit-frame-pointer -fasynchronous-unwind-tables` — optimized for benchmarking while preserving frame pointers and unwind tables for `perf` / flame graph analysis.
+- **Compilers**: GCC or Clang (Standard: `gnu17`)
+- **Build Systems**: Make and CMake (≥ 3.16)
+- **Build Modes**:
+  - **Release**: `-O3 -Wall -Wextra -fno-omit-frame-pointer -fasynchronous-unwind-tables` — optimized for benchmarking with frame pointers and unwind tables preserved for `perf` and flame graphs.
+  - **Trace/Debug**: adds `-O0 -g3 -fno-inline -fno-inline-functions -fno-optimize-sibling-calls -rdynamic` — every `static inline` helper resolves to a real call frame so `uftrace`, `gdb`, `strace`, and `perf` can step into each function.
 - **Code Style**: LLVM-based `.clang-format` — right-aligned pointers, Allman function braces, K&R control flow, 100-column soft limit.
 
 ## Build Instructions
 
-The build system automatically handles output directory creation.
+Either build system produces the same artifacts under `bin/`. Use GCC or Clang interchangeably.
 
-1. **Clean and Build**:
-   ```bash
-   make clean
-   make all
-   ```
+### Make
 
-2. **Artifacts**:
-   The compiled binary is located in the `bin/` directory:
-   - `./bin/spinlock_test`
+```bash
+make clean
+make all              # builds both targets
+# or build a single target:
+make release          # ./bin/spinlock_test
+make trace            # ./bin/spinlock_test_trace
+```
+
+Override the compiler with `make CC=clang all`.
+
+### CMake
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+
+# or with Clang:
+CC=clang cmake -S . -B build
+cmake --build build -j
+```
+
+### Artifacts (in `bin/`)
+- `./bin/spinlock_test` — **release build**, used for benchmarking and the headline numbers below.
+- `./bin/spinlock_test_trace` — **trace/debug build**, used with `uftrace`, `gdb`, `strace`, `perf`, and other analysis tools. Inlining is fully suppressed and `-rdynamic` exposes all symbols, so every helper appears as a real call frame.
 
 ## Usage & Options
 

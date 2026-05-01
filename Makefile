@@ -1,17 +1,35 @@
-TARGET = spinlock_test
-BIN_DIR = bin
-SRCS = spinlock_test.c test.c
-CC = gcc
-CFLAGS = -O3 -Wall -Wextra -std=gnu17 -fno-omit-frame-pointer -fasynchronous-unwind-tables
-LDLIBS = -pthread -lrt
+CC ?= gcc
+BIN_DIR := bin
+SRCS := spinlock_test.c test.c
 
-.PHONY: all clean
+TARGET_RELEASE := $(BIN_DIR)/spinlock_test
+TARGET_TRACE := $(BIN_DIR)/spinlock_test_trace
 
-all: $(BIN_DIR)/$(TARGET)
+WARN_FLAGS := -Wall -Wextra
+COMMON_CFLAGS := -std=gnu17 $(WARN_FLAGS) -fno-omit-frame-pointer -fasynchronous-unwind-tables
+LDLIBS := -pthread -lrt
 
-$(BIN_DIR)/$(TARGET): $(SRCS)
+RELEASE_CFLAGS := -O3 $(COMMON_CFLAGS)
+TRACE_CFLAGS := -O0 -g3 $(COMMON_CFLAGS) \
+                -fno-inline -fno-inline-functions \
+                -fno-optimize-sibling-calls
+TRACE_LDFLAGS := -rdynamic
+
+.PHONY: all release trace clean
+
+all: release trace
+
+release: $(TARGET_RELEASE)
+
+trace: $(TARGET_TRACE)
+
+$(TARGET_RELEASE): $(SRCS)
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS) $(SRCS) -o $@ $(LDLIBS)
+	$(CC) $(RELEASE_CFLAGS) $(SRCS) -o $@ $(LDLIBS)
+
+$(TARGET_TRACE): $(SRCS)
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(TRACE_CFLAGS) $(SRCS) -o $@ $(TRACE_LDFLAGS) $(LDLIBS)
 
 clean:
 	rm -rf $(BIN_DIR) *.o
