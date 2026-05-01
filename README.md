@@ -88,27 +88,59 @@ Adjust the exponential backoff parameters to optimize for specific hardware (e.g
 ./bin/spinlock_test -m 16 -M 4096
 ```
 
+## Profiling & Tracing the Trace Build
+
+The trace build (`./bin/spinlock_test_trace`) suppresses inlining and ships full debug info, so every `static inline` helper resolves to a real call frame. Common workflows:
+
+```bash
+# Function-level user-space trace (uftrace)
+uftrace ./bin/spinlock_test_trace -t 8 -l 0 -i 100000
+
+# Hot-path sampling with perf (DWARF call graph)
+perf record -F 999 --call-graph dwarf ./bin/spinlock_test_trace -t 8 -l 0 -i 100000
+perf report
+
+# Single-step into spin_lock under gdb
+gdb -ex 'b spin_lock' --args ./bin/spinlock_test_trace -t 2 -l 0 -i 1000
+
+# Syscall summary
+strace -c ./bin/spinlock_test_trace -t 4 -l 0 -i 100000
+```
+
+The release build (`./bin/spinlock_test`) is what `test_bench.py` exercises and what produces the headline numbers below.
+
 ## Benchmark Results
-*Test environment: Intel Core Ultra 5 226V, 4 Threads, 1M Iterations.*
+*Test environment: Intel Core Ultra 5 226V (8 cores / 8 threads), Arch Linux. Median of 7 runs (+ 1 discarded warmup), normalized to 1,000,000 lock/unlock cycles.*
+
+### Headline (4 threads)
 
 | Scenario | Lock Type | Time (ms) | Speedup |
 | :--- | :--- | :--- | :--- |
-| **Short Critical Section** | Pthread Mutex | 372.296 | 1.0x |
-| | **Custom Spinlock** | **49.113** | **7.6x** |
-| **Long Critical Section** | Pthread Mutex | 1,625.701 | 1.0x |
-| (500 nop loop) | **Custom Spinlock** | **622.615** | **2.6x** |
+| **Extreme contention (0 NOPs)** | Pthread Mutex | 378.7 | 1.0x |
+| | **Custom Spinlock** | **51.3** | **7.4x** |
+| **Short CS (200 NOPs)** | Pthread Mutex | 659.0 | 1.0x |
+| | **Custom Spinlock** | **247.5** | **2.7x** |
+| **Medium CS (2,000 NOPs)** | Pthread Mutex | 2,530.7 | 1.0x |
+| | **Custom Spinlock** | **1,186.3** | **2.1x** |
+| **Long CS (10,000 NOPs)** | Pthread Mutex | 7,554.8 | 1.0x |
+| | **Custom Spinlock** | **5,283.0** | **1.4x** |
 
 ## Automated Benchmarking & Visualization
-A Python-based automated runner (`test_bench.py`) is provided to analyze performance across various thread counts and workload intensities. It automatically generates a visual report.
+A Python-based automated runner (`test_bench.py`) sweeps thread counts × workload intensities, aggregates with **Median ± MAD** over **7 runs (+ 1 discarded warmup)**, and emits both a textual report and a comparison plot. Workloads target modern x86 CPUs: `0` (lock acquire/release alone), `200` (very short CS, ≈50 ns at ~4 GHz), `2,000` (medium CS, ≈500 ns), and `10,000` (long CS, ≈2.5 µs).
 
-### Real-World Performance (Intel Core Ultra 5 226V)
-*Target System: 8 Cores / 8 Threads, Arch Linux*
+### Real-World Performance (Intel Core Ultra 5 226V, 8 cores / 8 threads)
 
-| Workload Intensity (NOPs) | Threads | Spin (ms) | Mutex (ms) | Speedup |
+| Workload (NOPs) | Threads | Spin (ms) | Mutex (ms) | Speedup |
 | :--- | :--- | :--- | :--- | :--- |
-| **0 (Extreme Contention)** | 8 | 99.80 | 859.69 | **8.61x** |
-| **500 (Balanced)** | 4 | 622.62 | 1,625.70 | **2.61x** |
-| **2000 (Medium CS)** | 4 | 2,194.70 | 3,728.65 | **1.70x** |
-| **5000 (Long CS)** | 8 | 12,596.23 | 18,376.78 | **1.46x** |
+| **0** (extreme contention) | 2 | 15.31 | 136.07 | **8.89x** |
+| **0** (extreme contention) | 8 | 181.15 | 853.44 | **4.71x** |
+| **200** (short CS) | 4 | 247.47 | 658.97 | **2.66x** |
+| **200** (short CS) | 16 (oversub.) | 4,135.37 | 3,112.84 | **0.75x** |
+| **2,000** (medium CS) | 4 | 1,186.29 | 2,530.74 | **2.13x** |
+| **2,000** (medium CS) | 8 | 2,996.72 | 6,083.92 | **2.03x** |
+| **10,000** (long CS) | 8 | 12,107.30 | 16,926.64 | **1.40x** |
+| **10,000** (long CS) | 16 (oversub.) | 34,781.83 | 31,208.46 | **0.90x** |
+
+> **Reading the matrix.** The spinlock dominates from low to medium contention up to ~2 ms critical sections. Once the system is **over-subscribed** (more threads than physical cores) and the critical section is non-trivial, the bounded `nanosleep` yield can no longer keep spinning threads from starving the lock holder, and the kernel-mediated mutex matches or wins. Single-thread numbers are essentially tied across all workloads, as expected.
 
 ![Benchmark Result](bench_result.png)

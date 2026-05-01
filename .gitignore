@@ -5,6 +5,7 @@
 # Ignore object files and other binaries
 *.o
 spinlock_test
+spinlock_test_trace
 
 # Ignore shared library files
 *.so
@@ -32,6 +33,24 @@ ltrace.out
 ltrace.log
 *.ltrace
 uftrace.data/
+
+# CMake in-source residue (out-of-source builds go in /build/ above)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Python bytecode and tooling caches
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.ruff_cache/
+
+# perf / flamegraph / gprof artifacts
+perf.data
+perf.data.old
+flamegraph.svg
+gmon.out
 
 # LSP / Editor artifacts
 compile_commands.json

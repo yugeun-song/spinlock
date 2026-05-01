@@ -19,17 +19,22 @@ void *task_spinlock(void *arg)
         return NULL;
     }
 
+    const int iters = g_conf_iterations;
+    const int loops = g_conf_load_loops;
+    long long *const counter = ctx->shared_counter;
+    spinlock_t *const lock = ctx->spinlock;
+
     pthread_barrier_wait(ctx->barrier);
 
-    for (int i = 0; i < g_conf_iterations; ++i) {
-        spin_lock(ctx->spinlock);
-        ++(*ctx->shared_counter);
+    for (int i = 0; i < iters; ++i) {
+        spin_lock(lock);
+        ++(*counter);
 
-        for (int j = 0; j < g_conf_load_loops; ++j) {
+        for (int j = 0; j < loops; ++j) {
             asm volatile("nop" : : : "memory");
         }
 
-        spin_unlock(ctx->spinlock);
+        spin_unlock(lock);
     }
     return NULL;
 }
@@ -42,17 +47,22 @@ void *task_mutex(void *arg)
         return NULL;
     }
 
+    const int iters = g_conf_iterations;
+    const int loops = g_conf_load_loops;
+    long long *const counter = ctx->shared_counter;
+    pthread_mutex_t *const mutex = ctx->mutex;
+
     pthread_barrier_wait(ctx->barrier);
 
-    for (int i = 0; i < g_conf_iterations; ++i) {
-        pthread_mutex_lock(ctx->mutex);
-        ++(*ctx->shared_counter);
+    for (int i = 0; i < iters; ++i) {
+        pthread_mutex_lock(mutex);
+        ++(*counter);
 
-        for (int j = 0; j < g_conf_load_loops; ++j) {
+        for (int j = 0; j < loops; ++j) {
             asm volatile("nop" : : : "memory");
         }
 
-        pthread_mutex_unlock(ctx->mutex);
+        pthread_mutex_unlock(mutex);
     }
     return NULL;
 }

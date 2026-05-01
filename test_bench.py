@@ -1,53 +1,64 @@
-import matplotlib
-matplotlib.use('Agg')
+from __future__ import annotations
 
-import subprocess
-import re
 import os
-import sys
-import numpy as np
-import matplotlib.pyplot as plt
 import platform
+import re
+import subprocess
+import sys
 import time
+from pathlib import Path
 
-REPEATS = 5
-WORKLOAD_RANGE = [0, 500, 2000, 5000]
-BENCHMARK_BIN = "./bin/spinlock_test"
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 
-def mad(arr):
+REPEATS: int = 7
+WARMUP_RUNS: int = 1
+WORKLOAD_RANGE: list[int] = [0, 200, 2000, 10000]
+BENCHMARK_BIN: Path = Path("./bin/spinlock_test")
+
+RE_SPIN = re.compile(r"Custom Hybrid Spinlock \]\s+- Elapsed Time :\s+([\d.]+)")
+RE_MUTEX = re.compile(r"POSIX Mutex\s+\]\s+- Elapsed Time :\s+([\d.]+)")
+
+
+def mad(arr: np.ndarray) -> float:
     med = np.median(arr)
-    return np.median(np.abs(arr - med)) * 1.4826
+    return float(np.median(np.abs(arr - med)) * 1.4826)
 
 
-def get_cpu_model():
+def get_cpu_model() -> str:
     try:
-        with open("/proc/cpuinfo", "r") as f:
+        with open("/proc/cpuinfo") as f:
             for line in f:
                 if "model name" in line:
-                    return line.split(":")[1].strip()
+                    return line.split(":", 1)[1].strip()
     except FileNotFoundError:
         pass
     return platform.processor()
 
 
-def get_system_info():
+def get_system_info() -> tuple[str, int, str]:
     cpu_model = get_cpu_model()
     try:
-        num_cpus = os.sysconf('_SC_NPROCESSORS_ONLN')
+        num_cpus = os.sysconf("_SC_NPROCESSORS_ONLN")
     except (ValueError, OSError):
         num_cpus = os.cpu_count() or 4
     try:
-        l1_cache = subprocess.check_output(
-            ["getconf", "LEVEL1_DCACHE_LINESIZE"], stderr=subprocess.DEVNULL
-        ).decode().strip()
+        l1_cache = subprocess.run(
+            ["getconf", "LEVEL1_DCACHE_LINESIZE"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         l1_cache = "64"
     return cpu_model, num_cpus, l1_cache
 
 
-def build_threads_range(num_cpus):
-    threads = set()
+def build_threads_range(num_cpus: int) -> list[int]:
+    threads: set[int] = set()
     curr = num_cpus * 2
     while curr >= 1:
         threads.add(curr)
@@ -55,16 +66,32 @@ def build_threads_range(num_cpus):
     return sorted(threads)
 
 
-def run_bench(threads, workload):
-    raw_spin = []
-    raw_mutex = []
-    iterations = 1000000 if workload < 1000 else 400000
-    scale = 1000000 / iterations
+def pick_iterations(workload: int) -> int:
+    if workload < 500:
+        return 1_000_000
+    if workload < 5000:
+        return 400_000
+    return 100_000
 
-    for _ in range(REPEATS):
-        cmd = [BENCHMARK_BIN, "-t", str(threads), "-l", str(workload), "-i", str(iterations)]
+
+def run_bench(threads: int, workload: int) -> tuple[float, float, float, float, int]:
+    iterations = pick_iterations(workload)
+    scale = 1_000_000 / iterations
+    raw_spin: list[float] = []
+    raw_mutex: list[float] = []
+
+    for run_idx in range(REPEATS + WARMUP_RUNS):
+        cmd = [
+            str(BENCHMARK_BIN),
+            "-t", str(threads),
+            "-l", str(workload),
+            "-i", str(iterations),
+        ]
         try:
-            res = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=120).decode()
+            res = subprocess.run(
+                cmd,
+                capture_output=True, text=True, check=True, timeout=120,
+            ).stdout
         except subprocess.TimeoutExpired:
             print(f"\nWarning: benchmark timed out (threads={threads}, workload={workload})",
                   file=sys.stderr)
@@ -74,22 +101,33 @@ def run_bench(threads, workload):
                   file=sys.stderr)
             continue
 
-        s_m = re.search(r"Custom Hybrid Spinlock \]\s+- Elapsed Time :\s+([\d.]+)", res)
-        m_m = re.search(r"POSIX Mutex\s+\]\s+- Elapsed Time :\s+([\d.]+)", res)
+        s_m = RE_SPIN.search(res)
+        m_m = RE_MUTEX.search(res)
+        if not (s_m and m_m):
+            continue
 
-        if s_m and m_m:
-            raw_spin.append(float(s_m.group(1)) * scale)
-            raw_mutex.append(float(m_m.group(1)) * scale)
+        if run_idx < WARMUP_RUNS:
+            continue
+
+        raw_spin.append(float(s_m.group(1)) * scale)
+        raw_mutex.append(float(m_m.group(1)) * scale)
 
     if not raw_spin or not raw_mutex:
         return 0.0, 0.0, 0.0, 0.0, iterations
 
-    return (np.median(raw_spin), np.median(raw_mutex),
-            mad(raw_spin), mad(raw_mutex), iterations)
+    spin_arr = np.asarray(raw_spin)
+    mutex_arr = np.asarray(raw_mutex)
+    return (
+        float(np.median(spin_arr)),
+        float(np.median(mutex_arr)),
+        mad(spin_arr),
+        mad(mutex_arr),
+        iterations,
+    )
 
 
-def print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
-                 total_raw_cycles, duration):
+def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list[dict],
+                 threads_range: list[int], total_raw_cycles: int, duration: float) -> None:
     sep = "=" * 120
     line = "-" * 120
 
@@ -102,7 +140,7 @@ def print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
     print(f"  - L1 Cache Line   : {l1_cache} bytes")
     print(line)
     print(f"TEST PARAMETERS:")
-    print(f"  - Aggregation     : Median \u00b1 MAD of {REPEATS} runs")
+    print(f"  - Aggregation     : Median ± MAD of {REPEATS} runs (+ {WARMUP_RUNS} warmup discarded)")
     print(f"  - Normalization   : 1,000,000 Lock/Unlock cycles")
     print(f"  - Total Raw Ops   : {total_raw_cycles:,} cycles performed")
     print(f"  - Bench Duration  : {duration:.2f} seconds")
@@ -112,16 +150,18 @@ def print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
     print(line)
 
     for d in report_data:
-        spin_str = f"{d['spin_med']:.3f} \u00b1{d['spin_mad']:.1f}"
-        mutex_str = f"{d['mutex_med']:.3f} \u00b1{d['mutex_mad']:.1f}"
+        spin_str = f"{d['spin_med']:.3f} ±{d['spin_mad']:.1f}"
+        mutex_str = f"{d['mutex_med']:.3f} ±{d['mutex_mad']:.1f}"
         print(f"{d['workload']:<20} | {d['t']:<8} | {d['iters']:<10} | "
               f"{spin_str:<20} | {mutex_str:<20} | {d['ratio']:.2f}x")
         if d['t'] == threads_range[-1]:
             print(line)
 
 
-def plot_results(results_spin, results_mutex, results_spin_mad, results_mutex_mad,
-                 results_ratio, threads_range, cpu_model):
+def plot_results(results_spin: np.ndarray, results_mutex: np.ndarray,
+                 results_spin_mad: np.ndarray, results_mutex_mad: np.ndarray,
+                 results_ratio: np.ndarray, threads_range: list[int],
+                 cpu_model: str) -> None:
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 14))
 
@@ -155,7 +195,7 @@ def plot_results(results_spin, results_mutex, results_spin_mad, results_mutex_ma
     plt.savefig("bench_result.png", dpi=300)
 
 
-def main():
+def main() -> None:
     if not os.access(BENCHMARK_BIN, os.X_OK):
         print(f"Error: {BENCHMARK_BIN} not found or not executable. Run 'make' first.",
               file=sys.stderr)
@@ -177,7 +217,7 @@ def main():
     total_steps = n_wl * n_th
     current_step = 0
     total_raw_cycles = 0
-    report_data = []
+    report_data: list[dict] = []
 
     print(f"Executing Benchmarks on {cpu_model}...")
 
@@ -197,7 +237,7 @@ def main():
                 'workload': wl, 't': t,
                 'spin_med': spin_med, 'mutex_med': mutex_med,
                 'spin_mad': spin_mad, 'mutex_mad': mutex_mad,
-                'ratio': ratio, 'iters': iters
+                'ratio': ratio, 'iters': iters,
             })
 
             current_step += 1
