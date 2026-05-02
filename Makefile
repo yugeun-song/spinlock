@@ -6,7 +6,7 @@ TARGET_RELEASE := $(BIN_DIR)/spinlock_test
 TARGET_TRACE := $(BIN_DIR)/spinlock_test_trace
 
 WARN_FLAGS := -Wall -Wextra
-COMMON_CFLAGS := -std=gnu17 $(WARN_FLAGS) -fno-omit-frame-pointer -fasynchronous-unwind-tables
+COMMON_CFLAGS := -std=gnu99 $(WARN_FLAGS) -fno-omit-frame-pointer -fasynchronous-unwind-tables
 LDLIBS := -pthread -lrt
 
 RELEASE_CFLAGS := -O3 $(COMMON_CFLAGS)
