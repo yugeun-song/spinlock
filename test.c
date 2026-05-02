@@ -64,7 +64,9 @@ static int safe_strtoi(const char *str, int min, int max, const char *name)
     errno = 0;
     const long val = strtol(str, &endptr, 10);
 
-    if ((errno == ERANGE && (val == LONG_MAX || val == LONG_MIN)) || (errno != 0 && val == 0)) {
+    const int range_err = (errno == ERANGE) && (val == LONG_MAX || val == LONG_MIN);
+    const int other_err = (errno != 0) && (val == 0);
+    if (range_err || other_err) {
         perror("strtol");
         exit(EXIT_FAILURE);
     }
@@ -194,10 +196,11 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
     const double elapsed_ms = calc_time_diff_ms(&start, &end);
     const long long expected = (long long)g_conf_iterations * g_conf_nthreads;
 
+    const char *status = (local_counter == expected) ? "OK" : "FAIL";
     printf("[ %-22s ]\n"
            "  - Elapsed Time : %10.3f ms\n"
            "  - Atomic Count : %10lld / %lld (%s)\n",
-           name, elapsed_ms, local_counter, expected, (local_counter == expected) ? "OK" : "FAIL");
+           name, elapsed_ms, local_counter, expected, status);
 
     pthread_barrier_destroy(&barrier);
     pthread_mutex_destroy(&local_mutex);
@@ -214,7 +217,8 @@ static void run_warmup(void)
     long long local_counter = 0;
     const int saved_iters = g_conf_iterations;
 
-    g_conf_iterations = saved_iters / 10 > 0 ? saved_iters / 10 : 1;
+    const int warmup_iters = saved_iters / 10;
+    g_conf_iterations = (warmup_iters > 0) ? warmup_iters : 1;
 
     spin_init(&local_spinlock);
     pthread_mutex_init(&local_mutex, NULL);
@@ -279,12 +283,14 @@ int main(int argc, char *argv[])
     printf("\n");
     const double t_mutex = run_benchmark("POSIX Mutex", task_mutex);
 
+    const double speedup = t_mutex / t_spin;
+    const char *winner = (t_spin < t_mutex) ? "Custom Spinlock" : "POSIX Mutex";
     printf("\n--------------------------------------\n"
            "FINAL RESULT:\n"
            "  Speedup Factor : %.2fx\n"
            "  Winner         : %s\n"
            "--- BENCHMARK SUITE END ---\n\n",
-           t_mutex / t_spin, (t_spin < t_mutex) ? "Custom Spinlock" : "POSIX Mutex");
+           speedup, winner);
 
     return EXIT_SUCCESS;
 }

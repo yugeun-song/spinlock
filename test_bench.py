@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import os
 import platform
 import re
@@ -20,6 +21,8 @@ REPEATS: int = 7
 WARMUP_RUNS: int = 1
 WORKLOAD_RANGE: list[int] = [0, 200, 2000, 10000]
 BENCHMARK_BIN: Path = Path("./bin/spinlock_test")
+CSV_PATH: Path = Path("bench_results.csv")
+PNG_PATH: Path = Path("bench_result.png")
 
 RE_SPIN = re.compile(r"Custom Hybrid Spinlock \]\s+- Elapsed Time :\s+([\d.]+)")
 RE_MUTEX = re.compile(r"POSIX Mutex\s+\]\s+- Elapsed Time :\s+([\d.]+)")
@@ -153,7 +156,11 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
 
 def _draw_candle(ax: plt.Axes, x: float, arr: np.ndarray, width: float,
                  color: str, *, label: str | None = None) -> None:
-    """OHLC-style candle: body = IQR (Q1..Q3), wick = min..max, tick = median."""
+    """OHLC-style candle: body = IQR (Q1..Q3), wick = min..max, tick = median.
+
+    Individual measurements are overlaid as evenly-spaced points so the
+    full distribution is visible even when IQR collapses on log scale.
+    """
     if arr.size == 0:
         return
     q1 = float(np.percentile(arr, 25))
@@ -162,15 +169,23 @@ def _draw_candle(ax: plt.Axes, x: float, arr: np.ndarray, width: float,
     lo = float(arr.min())
     hi = float(arr.max())
 
-    ax.plot([x, x], [lo, hi], color="black", lw=0.9, zorder=2)
+    ax.plot([x, x], [lo, hi], color="black", lw=1.1, zorder=2)
     body_h = max(q3 - q1, (hi - lo) * 1e-3, 1e-9)
     ax.add_patch(plt.Rectangle(
         (x - width / 2, q1), width, body_h,
-        facecolor=color, edgecolor="black", lw=0.9, alpha=0.85,
+        facecolor=color, edgecolor="black", lw=1.1, alpha=0.65,
         zorder=3, label=label,
     ))
     ax.plot([x - width / 2, x + width / 2], [med, med],
-            color="black", lw=1.6, zorder=4)
+            color="black", lw=2.4, zorder=4)
+
+    n = arr.size
+    if n > 1:
+        offsets = np.linspace(-width * 0.30, width * 0.30, n)
+    else:
+        offsets = np.zeros(1)
+    ax.scatter(x + offsets, arr, s=18, facecolor="white",
+               edgecolor=color, linewidth=1.1, alpha=0.95, zorder=5)
 
 
 def plot_results(results_spin_raw: list[list[list[float]]],
@@ -180,7 +195,7 @@ def plot_results(results_spin_raw: list[list[list[float]]],
     n_wl = len(WORKLOAD_RANGE)
     n_th = len(threads_range)
 
-    fig = plt.figure(figsize=(13, 3.6 * n_wl + 4))
+    fig = plt.figure(figsize=(14, 3.9 * n_wl + 5))
     gs = fig.add_gridspec(n_wl + 1, 1, height_ratios=[1.0] * n_wl + [1.3])
 
     for i, wl in enumerate(WORKLOAD_RANGE):
@@ -190,16 +205,17 @@ def plot_results(results_spin_raw: list[list[list[float]]],
             mutex_arr = np.asarray(results_mutex_raw[i][j], dtype=float)
             spin_label = "Spinlock (body=IQR, wick=min-max, tick=median)" if (i == 0 and j == 0) else None
             mutex_label = "POSIX Mutex" if (i == 0 and j == 0) else None
-            _draw_candle(ax, j - 0.20, spin_arr, 0.34, SPIN_COLOR, label=spin_label)
-            _draw_candle(ax, j + 0.20, mutex_arr, 0.34, MUTEX_COLOR, label=mutex_label)
+            _draw_candle(ax, j - 0.24, spin_arr, 0.42, SPIN_COLOR, label=spin_label)
+            _draw_candle(ax, j + 0.24, mutex_arr, 0.42, MUTEX_COLOR, label=mutex_label)
 
         ax.set_xticks(range(n_th))
         ax.set_xticklabels([str(t) for t in threads_range])
         ax.set_xlim(-0.6, n_th - 0.4)
-        ax.set_ylabel("Time (ms)")
+        ax.set_yscale("log")
+        ax.set_ylabel("Time (ms, log scale)")
         ax.set_title(f"Latency distribution — Workload = {wl} NOPs", loc="left", fontsize=10)
-        ax.grid(True, axis="y", ls="--", alpha=0.4)
-        ax.margins(y=0.08)
+        ax.grid(True, axis="y", which="major", ls="--", alpha=0.5)
+        ax.grid(True, axis="y", which="minor", ls=":", alpha=0.25)
         if i == 0:
             ax.legend(loc="upper left", fontsize="small")
         if i == n_wl - 1:
@@ -211,16 +227,37 @@ def plot_results(results_spin_raw: list[list[list[float]]],
         ax.plot(threads_range, results_ratio[i, :],
                 label=f"{wl} NOPs", color=c, marker="s", lw=2)
     ax.axhline(y=1.0, color="red", ls="-", alpha=0.5, label="Baseline (1.0x)")
-    ax.set_title(f"Speedup (Mutex / Spinlock) — {cpu_model}", loc="left", fontsize=10)
+    ax.set_title("Speedup (Mutex / Spinlock)", loc="left", fontsize=10)
     ax.set_xlabel("Threads")
     ax.set_ylabel("Speedup ratio")
     ax.set_xticks(threads_range)
     ax.grid(True, ls="--", alpha=0.4)
     ax.legend(title="Workload (NOPs)", fontsize="small")
 
-    fig.suptitle("Hybrid Spinlock vs POSIX Mutex — 7-run candlestick", fontsize=12, y=0.995)
-    plt.tight_layout(rect=(0, 0, 1, 0.985))
-    plt.savefig("bench_result.png", dpi=200)
+    fig.suptitle(
+        f"Hybrid Spinlock vs POSIX Mutex — {cpu_model}\n"
+        f"latency panels use a log y-axis (Time in ms)",
+        fontsize=11, y=0.985,
+    )
+    plt.tight_layout(pad=2.6, h_pad=2.8, rect=(0.025, 0.02, 0.975, 0.955))
+    plt.savefig(PNG_PATH, dpi=200, bbox_inches=None)
+
+
+def write_csv(path: Path, results_spin_raw: list[list[list[float]]],
+              results_mutex_raw: list[list[list[float]]],
+              results_iters: list[list[int]],
+              threads_range: list[int]) -> None:
+    with path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["workload_nops", "threads", "lock", "iterations",
+                    "run_idx", "time_ms_normalized_to_1m_iters"])
+        for i, wl in enumerate(WORKLOAD_RANGE):
+            for j, t in enumerate(threads_range):
+                iters = results_iters[i][j]
+                for k, v in enumerate(results_spin_raw[i][j]):
+                    w.writerow([wl, t, "spin", iters, k, f"{v:.6f}"])
+                for k, v in enumerate(results_mutex_raw[i][j]):
+                    w.writerow([wl, t, "mutex", iters, k, f"{v:.6f}"])
 
 
 def main() -> None:
@@ -238,6 +275,7 @@ def main() -> None:
 
     results_spin_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
     results_mutex_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
+    results_iters: list[list[int]] = [[0] * n_th for _ in range(n_wl)]
     results_ratio = np.zeros((n_wl, n_th))
 
     total_steps = n_wl * n_th
@@ -252,6 +290,7 @@ def main() -> None:
             raw_spin, raw_mutex, iters = run_bench(t, wl)
             results_spin_raw[i][j] = raw_spin
             results_mutex_raw[i][j] = raw_mutex
+            results_iters[i][j] = iters
 
             spin_arr = np.asarray(raw_spin) if raw_spin else np.zeros(1)
             mutex_arr = np.asarray(raw_mutex) if raw_mutex else np.zeros(1)
@@ -283,8 +322,10 @@ def main() -> None:
                  total_raw_cycles, duration)
     plot_results(results_spin_raw, results_mutex_raw, results_ratio,
                  threads_range, cpu_model)
+    write_csv(CSV_PATH, results_spin_raw, results_mutex_raw,
+              results_iters, threads_range)
 
-    print("[Done] Report and plots saved as 'bench_result.png'")
+    print(f"[Done] Saved {PNG_PATH} and {CSV_PATH}")
 
 
 if __name__ == "__main__":

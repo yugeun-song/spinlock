@@ -95,7 +95,8 @@ static inline void spin_lock(spinlock_t *lock)
         backoff *= 2;
         if (backoff > spin_max) {
             backoff = spin_max;
-            nanosleep(&(const struct timespec){.tv_sec = 0, .tv_nsec = 1000}, NULL);
+            const struct timespec sleep_ts = { .tv_sec = 0, .tv_nsec = 1000 };
+            nanosleep(&sleep_ts, NULL);
         }
     }
 }

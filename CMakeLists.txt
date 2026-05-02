@@ -5,6 +5,11 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
+# Emit build/compile_commands.json so clangd / lsp pick up the exact CFLAGS,
+# include paths, and standard. Suppresses spurious diagnostics that arise when
+# the LSP guesses defaults (e.g. compound-literal warnings, missing macros).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
 set(SRCS spinlock_test.c test.c)

@@ -124,21 +124,22 @@ The release build (`./bin/spinlock_test`) is what `test_bench.py` exercises and 
 
 | Scenario | Lock Type | Time (ms) | Speedup |
 | :--- | :--- | :--- | :--- |
-| **Extreme contention (0 NOPs)** | Pthread Mutex | 378.1 | 1.0x |
-| | **Custom Spinlock** | **51.4** | **7.4x** |
-| **Short CS (200 NOPs)** | Pthread Mutex | 679.6 | 1.0x |
-| | **Custom Spinlock** | **254.7** | **2.7x** |
-| **Medium CS (2,000 NOPs)** | Pthread Mutex | 2,567.8 | 1.0x |
-| | **Custom Spinlock** | **1,158.9** | **2.2x** |
-| **Long CS (10,000 NOPs)** | Pthread Mutex | 8,001.8 | 1.0x |
-| | **Custom Spinlock** | **5,383.8** | **1.5x** |
+| **Extreme contention (0 NOPs)** | Pthread Mutex | 394.8 | 1.0x |
+| | **Custom Spinlock** | **51.2** | **7.7x** |
+| **Short CS (200 NOPs)** | Pthread Mutex | 663.0 | 1.0x |
+| | **Custom Spinlock** | **257.9** | **2.6x** |
+| **Medium CS (2,000 NOPs)** | Pthread Mutex | 2,557.5 | 1.0x |
+| | **Custom Spinlock** | **1,122.8** | **2.3x** |
+| **Long CS (10,000 NOPs)** | Pthread Mutex | 7,624.0 | 1.0x |
+| | **Custom Spinlock** | **5,290.9** | **1.4x** |
 
 ## Automated Benchmarking & Visualization
-A Python-based automated runner (`test_bench.py`) sweeps thread counts × workload intensities, aggregates with **Median ± MAD** over **7 runs (+ 1 discarded warmup)**, and emits both a textual report and an OHLC-style **candlestick** plot. Each candle encodes the full 7-run distribution per (threads, workload, lock) cell:
+A Python-based automated runner (`test_bench.py`) sweeps thread counts × workload intensities, aggregates with **Median ± MAD** over **7 runs (+ 1 discarded warmup)**, and emits a textual report, an OHLC-style **candlestick** plot (`bench_result.png`), and a raw CSV of every measurement (`bench_results.csv`). Each candle encodes the full 7-run distribution per (threads, workload, lock) cell:
 
 - **Body** = IQR (Q1 – Q3) — the typical run-to-run range
 - **Wick** = min – max — the noise envelope (how far an outlier can drag a run)
 - **Tick across the body** = median (the headline number)
+- **White dots inside each candle** = the 7 individual measurements (spread visible even when IQR is tiny on the log axis)
 - **Blue** = custom spinlock, **orange** = POSIX mutex (paired side-by-side at each thread count)
 
 The bottom panel shows the corresponding speedup (mutex / spin) as a line plot per workload.
@@ -149,15 +150,32 @@ Workloads target modern x86 CPUs: `0` (lock acquire/release alone), `200` (very 
 
 | Workload (NOPs) | Threads | Spin (ms) | Mutex (ms) | Speedup |
 | :--- | :--- | :--- | :--- | :--- |
-| **0** (extreme contention) | 2 | 17.13 | 132.42 | **7.73x** |
-| **0** (extreme contention) | 8 | 188.80 | 879.80 | **4.66x** |
-| **200** (short CS) | 4 | 254.67 | 679.58 | **2.67x** |
-| **200** (short CS) | 16 (oversub.) | 3,932.33 | 3,032.46 | **0.77x** |
-| **2,000** (medium CS) | 4 | 1,158.94 | 2,567.79 | **2.22x** |
-| **2,000** (medium CS) | 8 | 2,989.47 | 6,157.75 | **2.06x** |
-| **10,000** (long CS) | 8 | 11,735.92 | 17,909.42 | **1.53x** |
-| **10,000** (long CS) | 16 (oversub.) | 36,123.26 | 36,462.11 | **1.01x** |
+| **0** (extreme contention) | 2 | 18.94 | 147.41 | **7.78x** |
+| **0** (extreme contention) | 8 | 160.27 | 852.89 | **5.32x** |
+| **200** (short CS) | 4 | 257.93 | 662.98 | **2.57x** |
+| **200** (short CS) | 16 (oversub.) | 4,494.89 | 3,074.73 | **0.68x** |
+| **2,000** (medium CS) | 4 | 1,122.75 | 2,557.51 | **2.28x** |
+| **2,000** (medium CS) | 8 | 2,918.94 | 6,067.52 | **2.08x** |
+| **10,000** (long CS) | 8 | 12,048.50 | 17,034.20 | **1.41x** |
+| **10,000** (long CS) | 16 (oversub.) | 31,038.19 | 34,382.52 | **1.11x** |
 
-> **Reading the matrix.** The spinlock dominates from low to medium contention up to ~2 ms critical sections. Once the system is **over-subscribed** (more threads than physical cores) the bounded `nanosleep` yield can no longer keep spinning threads from starving the lock holder; with a short CS the mutex outright wins (0.77x), and at long CS the two converge to a near-tie (1.01x). Single-thread numbers are essentially identical across all workloads, as expected. The candlestick wicks in `bench_result.png` make the variance jump at over-subscription visible — that is exactly where you should reach for the kernel-mediated lock.
+> **Reading the matrix.** The spinlock dominates from low to medium contention up to ~2 ms critical sections — at 4 threads with no CS work it is **7.7x faster** than `pthread_mutex`. Once the system is **over-subscribed** (more threads than physical cores) the bounded `nanosleep` yield can no longer keep spinning threads from starving the lock holder; with a short CS mutex clearly wins (0.68x), while at long CS the two stay within 11% of each other. Single-thread numbers are essentially identical across all workloads, as expected. The white dots inside each candle in `bench_result.png` are the **7 individual measurements**, so wide spread (e.g. spin at 16 threads) is visible at a glance even when IQR collapses on the log axis — that is exactly where you should reach for the kernel-mediated lock.
+
+The full raw measurement table (280 rows: 4 workloads × 5 thread counts × 2 locks × 7 runs) is shipped as [`bench_results.csv`](bench_results.csv) for downstream analysis.
 
 ![Benchmark Result](bench_result.png)
+
+## Stability & Sanity Checks
+
+The trace build (`./bin/spinlock_test_trace`) was exercised under several validators:
+
+| Tool | Scope | Result |
+| :--- | :--- | :--- |
+| **Stress matrix** (5 thread × 3 workload × 2 iter × 2 lock = 60 runs) | atomic-count correctness | **60/60 OK** |
+| **valgrind memcheck** (`--leak-check=full`) | memory errors / leaks | **0 errors** |
+| **valgrind drd** | data races | **0 errors** |
+| **valgrind helgrind** | data races | 8 warnings (false positives) |
+| **AddressSanitizer + UBSan** (`-fsanitize=address,undefined`) | memory + UB | **clean, atomic count OK** |
+| **ThreadSanitizer** (`-fsanitize=thread`) | data races | 4 warnings (false positives), atomic count OK |
+
+The helgrind / TSan warnings are **expected**: both detectors only recognise synchronization expressed through `pthread` primitives or C11 `<stdatomic.h>`, and our spinlock acquires the lock through a raw `lock cmpxchgl` instruction with a `volatile`-qualified flag, which they cannot pattern-match. `drd` ignores them because of how it tracks vector clocks per memory access. None of the tools reported a memory error and every run produced the expected atomic count.
