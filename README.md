@@ -105,7 +105,15 @@ gdb -ex 'b spin_lock' --args ./bin/spinlock_test_trace -t 2 -l 0 -i 1000
 
 # Syscall summary
 strace -c ./bin/spinlock_test_trace -t 4 -l 0 -i 100000
+
+# Valgrind: memory errors, thread races, cache profile
+valgrind --tool=memcheck --leak-check=full ./bin/spinlock_test_trace -t 2 -l 0 -i 1000
+valgrind --tool=helgrind                    ./bin/spinlock_test_trace -t 4 -l 0 -i 1000
+valgrind --tool=drd                         ./bin/spinlock_test_trace -t 4 -l 0 -i 1000
+valgrind --tool=cachegrind                  ./bin/spinlock_test_trace -t 2 -l 500 -i 10000
 ```
+
+Use `make distclean` to scrub every debugger / profiler / tracer artifact (cores, valgrind dumps, perf.data, uftrace.data, `__pycache__`, CMake residue, …) on top of `make clean`'s build-only sweep.
 
 The release build (`./bin/spinlock_test`) is what `test_bench.py` exercises and what produces the headline numbers below.
 
@@ -116,31 +124,40 @@ The release build (`./bin/spinlock_test`) is what `test_bench.py` exercises and 
 
 | Scenario | Lock Type | Time (ms) | Speedup |
 | :--- | :--- | :--- | :--- |
-| **Extreme contention (0 NOPs)** | Pthread Mutex | 378.7 | 1.0x |
-| | **Custom Spinlock** | **51.3** | **7.4x** |
-| **Short CS (200 NOPs)** | Pthread Mutex | 659.0 | 1.0x |
-| | **Custom Spinlock** | **247.5** | **2.7x** |
-| **Medium CS (2,000 NOPs)** | Pthread Mutex | 2,530.7 | 1.0x |
-| | **Custom Spinlock** | **1,186.3** | **2.1x** |
-| **Long CS (10,000 NOPs)** | Pthread Mutex | 7,554.8 | 1.0x |
-| | **Custom Spinlock** | **5,283.0** | **1.4x** |
+| **Extreme contention (0 NOPs)** | Pthread Mutex | 378.1 | 1.0x |
+| | **Custom Spinlock** | **51.4** | **7.4x** |
+| **Short CS (200 NOPs)** | Pthread Mutex | 679.6 | 1.0x |
+| | **Custom Spinlock** | **254.7** | **2.7x** |
+| **Medium CS (2,000 NOPs)** | Pthread Mutex | 2,567.8 | 1.0x |
+| | **Custom Spinlock** | **1,158.9** | **2.2x** |
+| **Long CS (10,000 NOPs)** | Pthread Mutex | 8,001.8 | 1.0x |
+| | **Custom Spinlock** | **5,383.8** | **1.5x** |
 
 ## Automated Benchmarking & Visualization
-A Python-based automated runner (`test_bench.py`) sweeps thread counts × workload intensities, aggregates with **Median ± MAD** over **7 runs (+ 1 discarded warmup)**, and emits both a textual report and a comparison plot. Workloads target modern x86 CPUs: `0` (lock acquire/release alone), `200` (very short CS, ≈50 ns at ~4 GHz), `2,000` (medium CS, ≈500 ns), and `10,000` (long CS, ≈2.5 µs).
+A Python-based automated runner (`test_bench.py`) sweeps thread counts × workload intensities, aggregates with **Median ± MAD** over **7 runs (+ 1 discarded warmup)**, and emits both a textual report and an OHLC-style **candlestick** plot. Each candle encodes the full 7-run distribution per (threads, workload, lock) cell:
+
+- **Body** = IQR (Q1 – Q3) — the typical run-to-run range
+- **Wick** = min – max — the noise envelope (how far an outlier can drag a run)
+- **Tick across the body** = median (the headline number)
+- **Blue** = custom spinlock, **orange** = POSIX mutex (paired side-by-side at each thread count)
+
+The bottom panel shows the corresponding speedup (mutex / spin) as a line plot per workload.
+
+Workloads target modern x86 CPUs: `0` (lock acquire/release alone), `200` (very short CS, ≈50 ns at ~4 GHz), `2,000` (medium CS, ≈500 ns), and `10,000` (long CS, ≈2.5 µs).
 
 ### Real-World Performance (Intel Core Ultra 5 226V, 8 cores / 8 threads)
 
 | Workload (NOPs) | Threads | Spin (ms) | Mutex (ms) | Speedup |
 | :--- | :--- | :--- | :--- | :--- |
-| **0** (extreme contention) | 2 | 15.31 | 136.07 | **8.89x** |
-| **0** (extreme contention) | 8 | 181.15 | 853.44 | **4.71x** |
-| **200** (short CS) | 4 | 247.47 | 658.97 | **2.66x** |
-| **200** (short CS) | 16 (oversub.) | 4,135.37 | 3,112.84 | **0.75x** |
-| **2,000** (medium CS) | 4 | 1,186.29 | 2,530.74 | **2.13x** |
-| **2,000** (medium CS) | 8 | 2,996.72 | 6,083.92 | **2.03x** |
-| **10,000** (long CS) | 8 | 12,107.30 | 16,926.64 | **1.40x** |
-| **10,000** (long CS) | 16 (oversub.) | 34,781.83 | 31,208.46 | **0.90x** |
+| **0** (extreme contention) | 2 | 17.13 | 132.42 | **7.73x** |
+| **0** (extreme contention) | 8 | 188.80 | 879.80 | **4.66x** |
+| **200** (short CS) | 4 | 254.67 | 679.58 | **2.67x** |
+| **200** (short CS) | 16 (oversub.) | 3,932.33 | 3,032.46 | **0.77x** |
+| **2,000** (medium CS) | 4 | 1,158.94 | 2,567.79 | **2.22x** |
+| **2,000** (medium CS) | 8 | 2,989.47 | 6,157.75 | **2.06x** |
+| **10,000** (long CS) | 8 | 11,735.92 | 17,909.42 | **1.53x** |
+| **10,000** (long CS) | 16 (oversub.) | 36,123.26 | 36,462.11 | **1.01x** |
 
-> **Reading the matrix.** The spinlock dominates from low to medium contention up to ~2 ms critical sections. Once the system is **over-subscribed** (more threads than physical cores) and the critical section is non-trivial, the bounded `nanosleep` yield can no longer keep spinning threads from starving the lock holder, and the kernel-mediated mutex matches or wins. Single-thread numbers are essentially tied across all workloads, as expected.
+> **Reading the matrix.** The spinlock dominates from low to medium contention up to ~2 ms critical sections. Once the system is **over-subscribed** (more threads than physical cores) the bounded `nanosleep` yield can no longer keep spinning threads from starving the lock holder; with a short CS the mutex outright wins (0.77x), and at long CS the two converge to a near-tie (1.01x). Single-thread numbers are essentially identical across all workloads, as expected. The candlestick wicks in `bench_result.png` make the variance jump at over-subscription visible — that is exactly where you should reach for the kernel-mediated lock.
 
 ![Benchmark Result](bench_result.png)

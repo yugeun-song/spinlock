@@ -15,7 +15,7 @@ TRACE_CFLAGS := -O0 -g3 $(COMMON_CFLAGS) \
                 -fno-optimize-sibling-calls
 TRACE_LDFLAGS := -rdynamic
 
-.PHONY: all release trace clean
+.PHONY: all release trace clean distclean
 
 all: release trace
 
@@ -31,5 +31,18 @@ $(TARGET_TRACE): $(SRCS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(TRACE_CFLAGS) $(SRCS) -o $@ $(TRACE_LDFLAGS) $(LDLIBS)
 
+# Build artifacts only.
 clean:
-	rm -rf $(BIN_DIR) *.o
+	rm -rf $(BIN_DIR) build *.o
+
+# clean + every debugger / profiler / tracer / cache file the workflow can drop.
+distclean: clean
+	rm -f core core.* gdb.txt peda-session-*.txt
+	rm -f vgcore.* callgrind.out.* cachegrind.out.* massif.out.* helgrind.out.* drd.out.*
+	rm -f valgrind.log valgrind-*.log *.vgresult
+	rm -f strace.out strace.log *.strace ltrace.out ltrace.log *.ltrace
+	rm -rf uftrace.data uftrace.data.old
+	rm -f perf.data perf.data.old flamegraph.svg gmon.out
+	rm -rf __pycache__ .mypy_cache .ruff_cache
+	rm -rf CMakeFiles
+	rm -f CMakeCache.txt cmake_install.cmake compile_commands.json

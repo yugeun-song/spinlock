@@ -24,6 +24,10 @@ BENCHMARK_BIN: Path = Path("./bin/spinlock_test")
 RE_SPIN = re.compile(r"Custom Hybrid Spinlock \]\s+- Elapsed Time :\s+([\d.]+)")
 RE_MUTEX = re.compile(r"POSIX Mutex\s+\]\s+- Elapsed Time :\s+([\d.]+)")
 
+SPIN_COLOR = "#1f77b4"
+MUTEX_COLOR = "#ff7f0e"
+SPEEDUP_PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+
 
 def mad(arr: np.ndarray) -> float:
     med = np.median(arr)
@@ -74,7 +78,7 @@ def pick_iterations(workload: int) -> int:
     return 100_000
 
 
-def run_bench(threads: int, workload: int) -> tuple[float, float, float, float, int]:
+def run_bench(threads: int, workload: int) -> tuple[list[float], list[float], int]:
     iterations = pick_iterations(workload)
     scale = 1_000_000 / iterations
     raw_spin: list[float] = []
@@ -112,18 +116,7 @@ def run_bench(threads: int, workload: int) -> tuple[float, float, float, float, 
         raw_spin.append(float(s_m.group(1)) * scale)
         raw_mutex.append(float(m_m.group(1)) * scale)
 
-    if not raw_spin or not raw_mutex:
-        return 0.0, 0.0, 0.0, 0.0, iterations
-
-    spin_arr = np.asarray(raw_spin)
-    mutex_arr = np.asarray(raw_mutex)
-    return (
-        float(np.median(spin_arr)),
-        float(np.median(mutex_arr)),
-        mad(spin_arr),
-        mad(mutex_arr),
-        iterations,
-    )
+    return raw_spin, raw_mutex, iterations
 
 
 def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list[dict],
@@ -158,41 +151,76 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
             print(line)
 
 
-def plot_results(results_spin: np.ndarray, results_mutex: np.ndarray,
-                 results_spin_mad: np.ndarray, results_mutex_mad: np.ndarray,
+def _draw_candle(ax: plt.Axes, x: float, arr: np.ndarray, width: float,
+                 color: str, *, label: str | None = None) -> None:
+    """OHLC-style candle: body = IQR (Q1..Q3), wick = min..max, tick = median."""
+    if arr.size == 0:
+        return
+    q1 = float(np.percentile(arr, 25))
+    q3 = float(np.percentile(arr, 75))
+    med = float(np.median(arr))
+    lo = float(arr.min())
+    hi = float(arr.max())
+
+    ax.plot([x, x], [lo, hi], color="black", lw=0.9, zorder=2)
+    body_h = max(q3 - q1, (hi - lo) * 1e-3, 1e-9)
+    ax.add_patch(plt.Rectangle(
+        (x - width / 2, q1), width, body_h,
+        facecolor=color, edgecolor="black", lw=0.9, alpha=0.85,
+        zorder=3, label=label,
+    ))
+    ax.plot([x - width / 2, x + width / 2], [med, med],
+            color="black", lw=1.6, zorder=4)
+
+
+def plot_results(results_spin_raw: list[list[list[float]]],
+                 results_mutex_raw: list[list[list[float]]],
                  results_ratio: np.ndarray, threads_range: list[int],
                  cpu_model: str) -> None:
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 14))
+    n_wl = len(WORKLOAD_RANGE)
+    n_th = len(threads_range)
+
+    fig = plt.figure(figsize=(13, 3.6 * n_wl + 4))
+    gs = fig.add_gridspec(n_wl + 1, 1, height_ratios=[1.0] * n_wl + [1.3])
 
     for i, wl in enumerate(WORKLOAD_RANGE):
-        c = colors[i % len(colors)]
-        ax1.errorbar(threads_range, results_spin[i, :], yerr=results_spin_mad[i, :],
-                     label=f'Spin ({wl} NOPs)', color=c, marker='o', lw=2, capsize=3)
-        ax1.errorbar(threads_range, results_mutex[i, :], yerr=results_mutex_mad[i, :],
-                     label=f'Mutex ({wl} NOPs)', color=c, ls='--', marker='x',
-                     lw=1.5, alpha=0.7, capsize=3)
+        ax = fig.add_subplot(gs[i])
+        for j, _t in enumerate(threads_range):
+            spin_arr = np.asarray(results_spin_raw[i][j], dtype=float)
+            mutex_arr = np.asarray(results_mutex_raw[i][j], dtype=float)
+            spin_label = "Spinlock (body=IQR, wick=min-max, tick=median)" if (i == 0 and j == 0) else None
+            mutex_label = "POSIX Mutex" if (i == 0 and j == 0) else None
+            _draw_candle(ax, j - 0.20, spin_arr, 0.34, SPIN_COLOR, label=spin_label)
+            _draw_candle(ax, j + 0.20, mutex_arr, 0.34, MUTEX_COLOR, label=mutex_label)
 
-    ax1.set_title(f"Execution Latency (Normalized 1M Iters)\nTarget Hardware: {cpu_model}")
-    ax1.set_ylabel("Total Time (ms)")
-    ax1.set_xticks(threads_range)
-    ax1.grid(True, which='both', ls='--', alpha=0.5)
-    ax1.legend(loc='upper left', ncol=2, fontsize='small')
+        ax.set_xticks(range(n_th))
+        ax.set_xticklabels([str(t) for t in threads_range])
+        ax.set_xlim(-0.6, n_th - 0.4)
+        ax.set_ylabel("Time (ms)")
+        ax.set_title(f"Latency distribution — Workload = {wl} NOPs", loc="left", fontsize=10)
+        ax.grid(True, axis="y", ls="--", alpha=0.4)
+        ax.margins(y=0.08)
+        if i == 0:
+            ax.legend(loc="upper left", fontsize="small")
+        if i == n_wl - 1:
+            ax.set_xlabel("Threads")
 
+    ax = fig.add_subplot(gs[-1])
     for i, wl in enumerate(WORKLOAD_RANGE):
-        c = colors[i % len(colors)]
-        ax2.plot(threads_range, results_ratio[i, :], label=f'{wl} NOPs', color=c, marker='s', lw=2)
+        c = SPEEDUP_PALETTE[i % len(SPEEDUP_PALETTE)]
+        ax.plot(threads_range, results_ratio[i, :],
+                label=f"{wl} NOPs", color=c, marker="s", lw=2)
+    ax.axhline(y=1.0, color="red", ls="-", alpha=0.5, label="Baseline (1.0x)")
+    ax.set_title(f"Speedup (Mutex / Spinlock) — {cpu_model}", loc="left", fontsize=10)
+    ax.set_xlabel("Threads")
+    ax.set_ylabel("Speedup ratio")
+    ax.set_xticks(threads_range)
+    ax.grid(True, ls="--", alpha=0.4)
+    ax.legend(title="Workload (NOPs)", fontsize="small")
 
-    ax2.axhline(y=1.0, color='red', ls='-', alpha=0.5, label='Baseline (1.0x)')
-    ax2.set_title("Speedup Analysis: Mutex / Spinlock Ratio")
-    ax2.set_xlabel("Number of Threads")
-    ax2.set_ylabel("Ratio (Speedup Multiplier)")
-    ax2.set_xticks(threads_range)
-    ax2.grid(True, which='both', ls='--', alpha=0.5)
-    ax2.legend(title="Workload Intensity (Critical Section)")
-
-    plt.subplots_adjust(left=0.1, right=0.95, top=0.92, bottom=0.08, hspace=0.35)
-    plt.savefig("bench_result.png", dpi=300)
+    fig.suptitle("Hybrid Spinlock vs POSIX Mutex — 7-run candlestick", fontsize=12, y=0.995)
+    plt.tight_layout(rect=(0, 0, 1, 0.985))
+    plt.savefig("bench_result.png", dpi=200)
 
 
 def main() -> None:
@@ -208,10 +236,8 @@ def main() -> None:
     n_wl = len(WORKLOAD_RANGE)
     n_th = len(threads_range)
 
-    results_spin = np.zeros((n_wl, n_th))
-    results_mutex = np.zeros((n_wl, n_th))
-    results_spin_mad = np.zeros((n_wl, n_th))
-    results_mutex_mad = np.zeros((n_wl, n_th))
+    results_spin_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
+    results_mutex_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
     results_ratio = np.zeros((n_wl, n_th))
 
     total_steps = n_wl * n_th
@@ -223,26 +249,30 @@ def main() -> None:
 
     for i, wl in enumerate(WORKLOAD_RANGE):
         for j, t in enumerate(threads_range):
-            spin_med, mutex_med, spin_mad, mutex_mad, iters = run_bench(t, wl)
+            raw_spin, raw_mutex, iters = run_bench(t, wl)
+            results_spin_raw[i][j] = raw_spin
+            results_mutex_raw[i][j] = raw_mutex
 
-            results_spin[i, j] = spin_med
-            results_mutex[i, j] = mutex_med
-            results_spin_mad[i, j] = spin_mad
-            results_mutex_mad[i, j] = mutex_mad
+            spin_arr = np.asarray(raw_spin) if raw_spin else np.zeros(1)
+            mutex_arr = np.asarray(raw_mutex) if raw_mutex else np.zeros(1)
+            spin_med = float(np.median(spin_arr))
+            mutex_med = float(np.median(mutex_arr))
+            spin_mad_v = mad(spin_arr) if raw_spin else 0.0
+            mutex_mad_v = mad(mutex_arr) if raw_mutex else 0.0
             ratio = mutex_med / spin_med if spin_med > 0 else 0.0
             results_ratio[i, j] = ratio
 
             total_raw_cycles += iters * REPEATS * t
             report_data.append({
-                'workload': wl, 't': t,
-                'spin_med': spin_med, 'mutex_med': mutex_med,
-                'spin_mad': spin_mad, 'mutex_mad': mutex_mad,
-                'ratio': ratio, 'iters': iters,
+                "workload": wl, "t": t,
+                "spin_med": spin_med, "mutex_med": mutex_med,
+                "spin_mad": spin_mad_v, "mutex_mad": mutex_mad_v,
+                "ratio": ratio, "iters": iters,
             })
 
             current_step += 1
             pct = (current_step / total_steps) * 100
-            bar = '=' * int(pct // 2)
+            bar = "=" * int(pct // 2)
             sys.stdout.write(f"\rProgress: [{bar:<50}] {pct:.1f}% ({wl} NOPs, {t} Threads)")
             sys.stdout.flush()
 
@@ -251,8 +281,8 @@ def main() -> None:
     duration = time.time() - start_time
     print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
                  total_raw_cycles, duration)
-    plot_results(results_spin, results_mutex, results_spin_mad, results_mutex_mad,
-                 results_ratio, threads_range, cpu_model)
+    plot_results(results_spin_raw, results_mutex_raw, results_ratio,
+                 threads_range, cpu_model)
 
     print("[Done] Report and plots saved as 'bench_result.png'")
 

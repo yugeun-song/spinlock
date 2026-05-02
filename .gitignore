@@ -18,12 +18,16 @@ gdb.txt
 .gdb_history
 peda-session-*.txt
 
-# Valgrind artifacts
+# Valgrind artifacts (memcheck, callgrind, cachegrind, massif, helgrind, drd)
 vgcore.*
 callgrind.out.*
 cachegrind.out.*
 massif.out.*
 helgrind.out.*
+drd.out.*
+valgrind.log
+valgrind-*.log
+*.vgresult
 
 # strace, ltrace, uftrace artifacts
 strace.out
