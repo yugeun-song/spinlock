@@ -156,11 +156,7 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
 
 def _draw_candle(ax: plt.Axes, x: float, arr: np.ndarray, width: float,
                  color: str, *, label: str | None = None) -> None:
-    """OHLC-style candle: body = IQR (Q1..Q3), wick = min..max, tick = median.
-
-    Individual measurements are overlaid as evenly-spaced points so the
-    full distribution is visible even when IQR collapses on log scale.
-    """
+    """OHLC-style candle: body = IQR (Q1..Q3), wick = min..max, tick = median."""
     if arr.size == 0:
         return
     q1 = float(np.percentile(arr, 25))
@@ -173,19 +169,11 @@ def _draw_candle(ax: plt.Axes, x: float, arr: np.ndarray, width: float,
     body_h = max(q3 - q1, (hi - lo) * 1e-3, 1e-9)
     ax.add_patch(plt.Rectangle(
         (x - width / 2, q1), width, body_h,
-        facecolor=color, edgecolor="black", lw=1.1, alpha=0.65,
+        facecolor=color, edgecolor="black", lw=1.1, alpha=0.85,
         zorder=3, label=label,
     ))
     ax.plot([x - width / 2, x + width / 2], [med, med],
             color="black", lw=2.4, zorder=4)
-
-    n = arr.size
-    if n > 1:
-        offsets = np.linspace(-width * 0.30, width * 0.30, n)
-    else:
-        offsets = np.zeros(1)
-    ax.scatter(x + offsets, arr, s=18, facecolor="white",
-               edgecolor=color, linewidth=1.1, alpha=0.95, zorder=5)
 
 
 def plot_results(results_spin_raw: list[list[list[float]]],

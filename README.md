@@ -139,7 +139,6 @@ A Python-based automated runner (`test_bench.py`) sweeps thread counts × worklo
 - **Body** = IQR (Q1 – Q3) — the typical run-to-run range
 - **Wick** = min – max — the noise envelope (how far an outlier can drag a run)
 - **Tick across the body** = median (the headline number)
-- **White dots inside each candle** = the 7 individual measurements (spread visible even when IQR is tiny on the log axis)
 - **Blue** = custom spinlock, **orange** = POSIX mutex (paired side-by-side at each thread count)
 
 The bottom panel shows the corresponding speedup (mutex / spin) as a line plot per workload.
@@ -159,7 +158,7 @@ Workloads target modern x86 CPUs: `0` (lock acquire/release alone), `200` (very 
 | **10,000** (long CS) | 8 | 12,048.50 | 17,034.20 | **1.41x** |
 | **10,000** (long CS) | 16 (oversub.) | 31,038.19 | 34,382.52 | **1.11x** |
 
-> **Reading the matrix.** The spinlock dominates from low to medium contention up to ~2 ms critical sections — at 4 threads with no CS work it is **7.7x faster** than `pthread_mutex`. Once the system is **over-subscribed** (more threads than physical cores) the bounded `nanosleep` yield can no longer keep spinning threads from starving the lock holder; with a short CS mutex clearly wins (0.68x), while at long CS the two stay within 11% of each other. Single-thread numbers are essentially identical across all workloads, as expected. The white dots inside each candle in `bench_result.png` are the **7 individual measurements**, so wide spread (e.g. spin at 16 threads) is visible at a glance even when IQR collapses on the log axis — that is exactly where you should reach for the kernel-mediated lock.
+> **Reading the matrix.** The spinlock dominates from low to medium contention up to ~2 ms critical sections — at 4 threads with no CS work it is **7.7x faster** than `pthread_mutex`. Once the system is **over-subscribed** (more threads than physical cores) the bounded `nanosleep` yield can no longer keep spinning threads from starving the lock holder; with a short CS mutex clearly wins (0.68x), while at long CS the two stay within 11% of each other. Single-thread numbers are essentially identical across all workloads, as expected. The wick length in `bench_result.png` (and the log y-axis) makes the variance jump at over-subscription visible — that is exactly where you should reach for the kernel-mediated lock.
 
 The full raw measurement table (280 rows: 4 workloads × 5 thread counts × 2 locks × 7 runs) is shipped as [`bench_results.csv`](bench_results.csv) for downstream analysis.
 
