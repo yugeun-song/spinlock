@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import os
 import platform
@@ -30,6 +31,12 @@ RE_MUTEX = re.compile(r"POSIX Mutex\s+\]\s+- Elapsed Time :\s+([\d.]+)")
 SPIN_COLOR = "#1f77b4"
 MUTEX_COLOR = "#ff7f0e"
 SPEEDUP_PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+
+# Winner colours for the latency candles (Korean stock convention: red = gain).
+WIN_SPIN = "#d62728"   # red  — our spinlock wins (lower median latency)
+WIN_MUTEX = "#1f77b4"  # blue — pthread mutex wins
+LOSE_GRAY = "#b6b9be"  # muted gray — the slower (losing) lock at that thread count
+LABEL_COLOR = {WIN_SPIN: "#a01b1c", WIN_MUTEX: "#155b8a", LOSE_GRAY: "#6b7075"}
 
 
 def mad(arr: np.ndarray) -> float:
@@ -155,7 +162,8 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
 
 
 def _draw_candle(ax: plt.Axes, x: float, arr: np.ndarray, width: float,
-                 color: str, *, label: str | None = None) -> None:
+                 color: str, *, label: str | None = None,
+                 median_label: bool = False, label_color: str | None = None) -> None:
     """OHLC-style candle: body = IQR (Q1..Q3), wick = min..max, tick = median."""
     if arr.size == 0:
         return
@@ -165,15 +173,28 @@ def _draw_candle(ax: plt.Axes, x: float, arr: np.ndarray, width: float,
     lo = float(arr.min())
     hi = float(arr.max())
 
-    ax.plot([x, x], [lo, hi], color="black", lw=1.1, zorder=2)
-    body_h = max(q3 - q1, (hi - lo) * 1e-3, 1e-9)
+    # Wick: the min..max noise envelope.
+    ax.plot([x, x], [lo, hi], color="#1a1a1a", lw=1.4, zorder=4,
+            solid_capstyle="round")
+    # Body: the inter-quartile range, drawn opaque with a crisp dark border so
+    # adjacent candles never blur together.
+    body_h = max(q3 - q1, med * 2e-3, 1e-9)
     ax.add_patch(plt.Rectangle(
         (x - width / 2, q1), width, body_h,
-        facecolor=color, edgecolor="black", lw=1.1, alpha=0.85,
-        zorder=3, label=label,
+        facecolor=color, edgecolor="#111111", lw=1.5, alpha=1.0,
+        zorder=5, label=label,
     ))
+    # Median tick: a white halo under a black core so the headline number stays
+    # legible on top of the coloured body.
     ax.plot([x - width / 2, x + width / 2], [med, med],
-            color="black", lw=2.4, zorder=4)
+            color="white", lw=3.2, zorder=6, solid_capstyle="butt")
+    ax.plot([x - width / 2, x + width / 2], [med, med],
+            color="black", lw=1.4, zorder=7, solid_capstyle="butt")
+    if median_label:
+        txt = f"{med:.0f}" if med >= 100 else f"{med:.1f}"
+        ax.annotate(txt, xy=(x, hi), xytext=(0, 3), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=6.5,
+                    color=label_color or color, fontweight="bold", zorder=8)
 
 
 def plot_results(results_spin_raw: list[list[list[float]]],
@@ -182,53 +203,104 @@ def plot_results(results_spin_raw: list[list[list[float]]],
                  cpu_model: str) -> None:
     n_wl = len(WORKLOAD_RANGE)
     n_th = len(threads_range)
+    ncols = 2 if n_wl > 1 else 1
+    nrows = (n_wl + ncols - 1) // ncols
 
-    fig = plt.figure(figsize=(14, 3.9 * n_wl + 5))
-    gs = fig.add_gridspec(n_wl + 1, 1, height_ratios=[1.0] * n_wl + [1.3])
+    fig = plt.figure(figsize=(7.4 * ncols, 4.2 * nrows + 4.0))
+    gs = fig.add_gridspec(nrows + 1, ncols,
+                          height_ratios=[1.0] * nrows + [0.95],
+                          hspace=0.34, wspace=0.16)
 
     for i, wl in enumerate(WORKLOAD_RANGE):
-        ax = fig.add_subplot(gs[i])
+        ax = fig.add_subplot(gs[i // ncols, i % ncols])
+        ax.set_axisbelow(True)
+        # Give every thread count its own lane: an alternating background band
+        # plus a separator line so neighbouring candle pairs are unmistakably
+        # distinct groups.
+        for j in range(n_th):
+            if j % 2 == 1:
+                ax.axvspan(j - 0.5, j + 0.5, color="#4c4c4c", alpha=0.06, zorder=0)
+            if j < n_th - 1:
+                ax.axvline(j + 0.5, color="#d0d0d0", lw=0.9, zorder=1)
+        panel_hi, panel_lo = 0.0, float("inf")
         for j, _t in enumerate(threads_range):
             spin_arr = np.asarray(results_spin_raw[i][j], dtype=float)
             mutex_arr = np.asarray(results_mutex_raw[i][j], dtype=float)
-            spin_label = "Spinlock (body=IQR, wick=min-max, tick=median)" if (i == 0 and j == 0) else None
-            mutex_label = "POSIX Mutex" if (i == 0 and j == 0) else None
-            _draw_candle(ax, j - 0.24, spin_arr, 0.42, SPIN_COLOR, label=spin_label)
-            _draw_candle(ax, j + 0.24, mutex_arr, 0.42, MUTEX_COLOR, label=mutex_label)
+            for arr in (spin_arr, mutex_arr):
+                if arr.size:
+                    panel_hi = max(panel_hi, float(arr.max()))
+                    panel_lo = min(panel_lo, float(arr.min()))
+            # Winner at this thread count = lower median latency. Colour the
+            # winner (red = spinlock, blue = mutex) and mute the loser to gray.
+            spin_med = float(np.median(spin_arr)) if spin_arr.size else float("inf")
+            mutex_med = float(np.median(mutex_arr)) if mutex_arr.size else float("inf")
+            if spin_med < mutex_med:
+                spin_fill, mutex_fill = WIN_SPIN, LOSE_GRAY
+            elif mutex_med < spin_med:
+                spin_fill, mutex_fill = LOSE_GRAY, WIN_MUTEX
+            else:
+                spin_fill = mutex_fill = LOSE_GRAY
+            _draw_candle(ax, j - 0.21, spin_arr, 0.34, spin_fill,
+                         median_label=True, label_color=LABEL_COLOR[spin_fill])
+            _draw_candle(ax, j + 0.21, mutex_arr, 0.34, mutex_fill,
+                         median_label=True, label_color=LABEL_COLOR[mutex_fill])
 
         ax.set_xticks(range(n_th))
         ax.set_xticklabels([str(t) for t in threads_range])
         ax.set_xlim(-0.6, n_th - 0.4)
         ax.set_yscale("log")
-        ax.set_ylabel("Time (ms, log scale)")
-        ax.set_title(f"Latency distribution — Workload = {wl} NOPs", loc="left", fontsize=10)
-        ax.grid(True, axis="y", which="major", ls="--", alpha=0.5)
-        ax.grid(True, axis="y", which="minor", ls=":", alpha=0.25)
+        if panel_hi > 0.0 and panel_lo < float("inf"):
+            # Headroom on the log axis so the tallest candle and its median
+            # label clear the top frame instead of colliding with it.
+            ax.set_ylim(panel_lo / 1.7, panel_hi * 2.6)
+        ax.set_ylabel("Time (ms, log)")
+        ax.set_xlabel("Threads")
+        ax.set_title(f"Critical-section work = {wl} NOPs", loc="left",
+                     fontsize=11, fontweight="bold")
+        ax.grid(True, axis="y", which="major", ls="--", alpha=0.45)
+        ax.grid(True, axis="y", which="minor", ls=":", alpha=0.2)
         if i == 0:
-            ax.legend(loc="upper left", fontsize="small")
-        if i == n_wl - 1:
-            ax.set_xlabel("Threads")
+            legend_handles = [
+                plt.Rectangle((0, 0), 1, 1, facecolor=WIN_SPIN,
+                              edgecolor="#111111", label="Spinlock wins"),
+                plt.Rectangle((0, 0), 1, 1, facecolor=WIN_MUTEX,
+                              edgecolor="#111111", label="POSIX Mutex wins"),
+                plt.Rectangle((0, 0), 1, 1, facecolor=LOSE_GRAY,
+                              edgecolor="#111111", label="loser (slower)"),
+            ]
+            ax.legend(handles=legend_handles, loc="upper left", fontsize=8.5,
+                      framealpha=0.95,
+                      title="left bar = Spinlock, right bar = Mutex\n"
+                            "body=IQR · wick=min–max · tick=median",
+                      title_fontsize=7.5)
 
-    ax = fig.add_subplot(gs[-1])
+    ax = fig.add_subplot(gs[nrows, :])
+    xpos = list(range(n_th))
     for i, wl in enumerate(WORKLOAD_RANGE):
         c = SPEEDUP_PALETTE[i % len(SPEEDUP_PALETTE)]
-        ax.plot(threads_range, results_ratio[i, :],
-                label=f"{wl} NOPs", color=c, marker="s", lw=2)
-    ax.axhline(y=1.0, color="red", ls="-", alpha=0.5, label="Baseline (1.0x)")
-    ax.set_title("Speedup (Mutex / Spinlock)", loc="left", fontsize=10)
+        ax.plot(xpos, results_ratio[i, :], label=f"{wl} NOPs",
+                color=c, marker="o", lw=2.2, ms=7)
+    ax.axhline(y=1.0, color="red", ls="--", alpha=0.6, lw=1.5,
+               label="break-even (1.0x)")
+    ax.set_xticks(xpos)
+    ax.set_xticklabels([str(t) for t in threads_range])
+    ax.set_xlim(-0.3, n_th - 0.7)
+    ax.set_title("Speedup (Mutex / Spinlock) — above 1.0, the spinlock wins",
+                 loc="left", fontsize=11, fontweight="bold")
     ax.set_xlabel("Threads")
-    ax.set_ylabel("Speedup ratio")
-    ax.set_xticks(threads_range)
+    ax.set_ylabel("Speedup (x)")
     ax.grid(True, ls="--", alpha=0.4)
-    ax.legend(title="Workload (NOPs)", fontsize="small")
+    ax.legend(title="Critical-section work (NOPs)", fontsize=9, ncol=3,
+              loc="upper right")
 
-    fig.suptitle(
-        f"Hybrid Spinlock vs POSIX Mutex — {cpu_model}\n"
-        f"latency panels use a log y-axis (Time in ms)",
-        fontsize=11, y=0.985,
-    )
-    plt.tight_layout(pad=2.6, h_pad=2.8, rect=(0.025, 0.02, 0.975, 0.955))
-    plt.savefig(PNG_PATH, dpi=200, bbox_inches=None)
+    fig.suptitle(f"Spinlock vs POSIX Mutex — {cpu_model}",
+                 fontsize=14, fontweight="bold", y=0.998)
+    fig.text(0.5, 0.008,
+             "Critical-section work is emulated with N filler NOP instructions executed while the "
+             "lock is held (NOP = no-op: burns cycles, does no real work).",
+             ha="center", fontsize=9, color="#555555", style="italic")
+    fig.savefig(PNG_PATH, dpi=170, bbox_inches="tight")
+    plt.close(fig)
 
 
 def write_csv(path: Path, results_spin_raw: list[list[list[float]]],
@@ -248,13 +320,78 @@ def write_csv(path: Path, results_spin_raw: list[list[list[float]]],
                     w.writerow([wl, t, "mutex", iters, k, f"{v:.6f}"])
 
 
+def load_results_from_csv(
+    path: Path,
+) -> tuple[list[list[list[float]]], list[list[list[float]]], np.ndarray, list[int]]:
+    """Rebuild the nested raw-result structure (and median speedups) from a CSV.
+
+    Lets the plot be regenerated from a committed measurement set without
+    re-running the benchmark, so the tracked CSV stays the source of truth.
+    """
+    spin: dict[tuple[int, int], list[float]] = {}
+    mutex: dict[tuple[int, int], list[float]] = {}
+    threads_set: set[int] = set()
+
+    with path.open(newline="") as f:
+        for row in csv.DictReader(f):
+            wl = int(row["workload_nops"])
+            t = int(row["threads"])
+            val = float(row["time_ms_normalized_to_1m_iters"])
+            threads_set.add(t)
+            bucket = spin if row["lock"] == "spin" else mutex
+            bucket.setdefault((wl, t), []).append(val)
+
+    threads_range = sorted(threads_set)
+    n_wl, n_th = len(WORKLOAD_RANGE), len(threads_range)
+
+    results_spin_raw = [[spin.get((wl, t), []) for t in threads_range]
+                        for wl in WORKLOAD_RANGE]
+    results_mutex_raw = [[mutex.get((wl, t), []) for t in threads_range]
+                         for wl in WORKLOAD_RANGE]
+    results_ratio = np.zeros((n_wl, n_th))
+    for i in range(n_wl):
+        for j in range(n_th):
+            s, m = results_spin_raw[i][j], results_mutex_raw[i][j]
+            spin_med = float(np.median(s)) if s else 0.0
+            mutex_med = float(np.median(m)) if m else 0.0
+            results_ratio[i, j] = (mutex_med / spin_med) if spin_med > 0 else 0.0
+
+    return results_spin_raw, results_mutex_raw, results_ratio, threads_range
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Benchmark the hybrid spinlock vs pthread_mutex and plot it.")
+    parser.add_argument(
+        "--plot-only", action="store_true",
+        help=f"Skip benchmarking and redraw {PNG_PATH} from an existing "
+             f"{CSV_PATH} (the CSV is read, never modified).")
+    parser.add_argument(
+        "--cpu-model", default=None,
+        help="Override the CPU label in the plot title; useful with --plot-only "
+             "when re-rendering data captured on another machine.")
+    cli = parser.parse_args()
+
+    if cli.plot_only:
+        if not CSV_PATH.exists():
+            print(f"Error: {CSV_PATH} not found; run a full sweep first.",
+                  file=sys.stderr)
+            sys.exit(1)
+        cpu_model = cli.cpu_model or get_cpu_model()
+        rs, rm, rr, threads_range = load_results_from_csv(CSV_PATH)
+        plot_results(rs, rm, rr, threads_range, cpu_model)
+        print(f"[Done] Re-plotted {PNG_PATH} from {CSV_PATH} "
+              f"(no benchmarks run, CSV untouched)")
+        return
+
     if not os.access(BENCHMARK_BIN, os.X_OK):
         print(f"Error: {BENCHMARK_BIN} not found or not executable. Run 'make' first.",
               file=sys.stderr)
         sys.exit(1)
 
     cpu_model, num_cpus, l1_cache = get_system_info()
+    if cli.cpu_model:
+        cpu_model = cli.cpu_model
     threads_range = build_threads_range(num_cpus)
     start_time = time.time()
 
