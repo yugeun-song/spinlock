@@ -9,6 +9,7 @@ double calc_time_diff_ms(const struct timespec *start, const struct timespec *en
     const long long sec_diff = end->tv_sec - start->tv_sec;
     const long long nsec_diff = end->tv_nsec - start->tv_nsec;
     const long long elapsed_ns = sec_diff * 1000000000LL + nsec_diff;
+
     return (double)elapsed_ns / 1000000.0;
 }
 
@@ -37,6 +38,7 @@ void *task_spinlock(void *arg)
 
         spin_unlock(lock);
     }
+
     return NULL;
 }
 
@@ -65,5 +67,6 @@ void *task_mutex(void *arg)
 
         pthread_mutex_unlock(mutex);
     }
+
     return NULL;
 }

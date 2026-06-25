@@ -33,12 +33,12 @@ static void detect_system_topology(void)
         g_sys_cache_line_size = 64;
     }
 
-    if (g_sys_cache_line_size != COMPILE_TIME_CACHE_LINE_SIZE) {
+    if (g_sys_cache_line_size != CACHE_LINE_SIZE) {
         fprintf(stderr,
                 "\n[WARNING] Cache Line Size Mismatch!\n"
                 "  Detected: %ld bytes\n"
                 "  Compiled: %d bytes\n\n",
-                g_sys_cache_line_size, COMPILE_TIME_CACHE_LINE_SIZE);
+                g_sys_cache_line_size, CACHE_LINE_SIZE);
     }
 }
 
@@ -205,6 +205,7 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
     pthread_barrier_destroy(&barrier);
     pthread_mutex_destroy(&local_mutex);
     free(threads);
+
     return elapsed_ms;
 }
 

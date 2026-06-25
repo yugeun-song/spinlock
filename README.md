@@ -1,9 +1,11 @@
 # Spinlock Implementation & Performance Test
 
-This project provides a custom spinlock implementation using x86-64 inline assembly and compares its performance with POSIX mutex (`pthread_mutex`). The benchmark allows granular control over threading, iteration counts, and workload simulation via command-line arguments.
+This project provides a custom spinlock implementation using architecture-specific inline assembly (x86-64 and arm64) and compares its performance with POSIX mutex (`pthread_mutex`). The benchmark allows granular control over threading, iteration counts, and workload simulation via command-line arguments.
 
 ## Supported Platforms
-- **Architecture**: x86-64 (Required for `pause` and `lock cmpxchgl` instructions)
+- **Architecture**: x86-64 and arm64 (AArch64). Each acquire/release primitive is emitted as architecture-specific inline assembly selected at compile time (`#if defined(__x86_64__)` / `__aarch64__`); any other target stops with a `#error`.
+  - **x86-64**: `pause` spin hint, `lock cmpxchgl` acquire, and a plain store release — sufficient under the strong x86-TSO memory model.
+  - **arm64**: `yield` spin hint, an `ldaxr`/`stlxr` load-acquire CAS, and an `stlr` store-release — the stronger ordering the weakly-ordered arm64 memory model requires (a plain store is *not* a release on arm64).
 - **OS**: Linux
 - **Compilers**: GCC or Clang (Standard: `gnu99`)
 - **Build Systems**: Make and CMake (≥ 3.16)
@@ -37,6 +39,16 @@ cmake --build build -j
 # or with Clang:
 CC=clang cmake -S . -B build
 cmake --build build -j
+```
+
+### arm64 (AArch64)
+
+On an arm64 host, `make` and `cmake` work unchanged — the build flags carry no x86-specific options. To cross-build from an x86 host and run under QEMU:
+
+```bash
+aarch64-linux-gnu-gcc -O3 -std=gnu99 -Wall -Wextra -static \
+    spinlock_test.c test.c -o spinlock_test_arm64 -pthread -lrt
+qemu-aarch64 ./spinlock_test_arm64 -t 8 -l 0 -i 100000
 ```
 
 ### Artifacts (in `bin/`)
@@ -83,7 +95,7 @@ Simulate a scenario where the lock is held for a longer duration (10,000 nops), 
 ```
 
 #### 4. Tuning Backoff Algorithm
-Adjust the exponential backoff parameters to optimize for specific hardware (e.g., Intel Core Ultra series).
+Adjust the exponential backoff parameters to optimize for specific hardware (e.g., Intel Core Ultra or ARM Cortex/Neoverse cores).
 ```bash
 ./bin/spinlock_test -m 16 -M 4096
 ```
@@ -111,6 +123,13 @@ valgrind --tool=memcheck --leak-check=full ./bin/spinlock_test_trace -t 2 -l 0 -
 valgrind --tool=helgrind                    ./bin/spinlock_test_trace -t 4 -l 0 -i 1000
 valgrind --tool=drd                         ./bin/spinlock_test_trace -t 4 -l 0 -i 1000
 valgrind --tool=cachegrind                  ./bin/spinlock_test_trace -t 2 -l 500 -i 10000
+```
+
+All commands above run unchanged on an arm64 host. To drive a cross-built arm64 binary from an x86 host, wrap it in QEMU's gdbstub and attach the cross debugger:
+
+```bash
+qemu-aarch64 -g 1234 ./spinlock_test_arm64_trace -t 2 -l 0 -i 1000 &
+aarch64-linux-gnu-gdb -ex 'target remote :1234' -ex 'b spin_lock' ./spinlock_test_arm64_trace
 ```
 
 Use `make distclean` to scrub every debugger / profiler / tracer artifact (cores, valgrind dumps, perf.data, uftrace.data, `__pycache__`, CMake residue, …) on top of `make clean`'s build-only sweep.
@@ -143,7 +162,9 @@ A Python-based automated runner (`test_bench.py`) sweeps thread counts × worklo
 
 The bottom panel shows the corresponding speedup (mutex / spin) as a line plot per workload.
 
-Workloads target modern x86 CPUs: `0` (lock acquire/release alone), `200` (very short CS, ≈50 ns at ~4 GHz), `2,000` (medium CS, ≈500 ns), and `10,000` (long CS, ≈2.5 µs).
+The four workload panels are laid out as a 2×2 grid of log-scale plots with an alternating shaded lane behind each thread count, so the spin/mutex candle pairs stay clearly separated even at high thread counts; the median of each cell is printed above its candle. Run `python3 test_bench.py --plot-only` to regenerate `bench_result.png` from an existing `bench_results.csv` without re-running the benchmark (the CSV is read, never modified).
+
+Workloads target modern CPUs: `0` (lock acquire/release alone), `200` (very short CS, ≈50 ns at ~4 GHz), `2,000` (medium CS, ≈500 ns), and `10,000` (long CS, ≈2.5 µs).
 
 ### Real-World Performance (Intel Core Ultra 5 226V, 8 cores / 8 threads)
 
@@ -177,4 +198,6 @@ The trace build (`./bin/spinlock_test_trace`) was exercised under several valida
 | **AddressSanitizer + UBSan** (`-fsanitize=address,undefined`) | memory + UB | **clean, atomic count OK** |
 | **ThreadSanitizer** (`-fsanitize=thread`) | data races | 4 warnings (false positives), atomic count OK |
 
-The helgrind / TSan warnings are **expected**: both detectors only recognise synchronization expressed through `pthread` primitives or C11 `<stdatomic.h>`, and our spinlock acquires the lock through a raw `lock cmpxchgl` instruction with a `volatile`-qualified flag, which they cannot pattern-match. `drd` ignores them because of how it tracks vector clocks per memory access. None of the tools reported a memory error and every run produced the expected atomic count.
+The helgrind / TSan warnings are **expected**: both detectors only recognise synchronization expressed through `pthread` primitives or C11 `<stdatomic.h>`, and our spinlock acquires the lock through raw atomic instructions (`lock cmpxchgl` on x86-64; an `ldaxr`/`stlxr` load-acquire CAS with an `stlr` release on arm64) over a `volatile`-qualified flag, which they cannot pattern-match. `drd` ignores them because of how it tracks vector clocks per memory access. None of the tools reported a memory error and every run produced the expected atomic count.
+
+The results above are from the x86-64 build. On arm64, correctness is established by construction: the emitted `ldaxr`/`stlxr` acquire and `stlr` release are confirmed by disassembly, and the atomic-count oracle passes under QEMU (`qemu-aarch64`) across high-contention and over-subscribed thread counts. Note that QEMU-user does not reproduce weak-memory reordering, so the guarantee rests on the architecturally-correct acquire/release barriers rather than on the emulator.
