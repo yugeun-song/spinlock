@@ -20,23 +20,51 @@ import numpy as np
 
 REPEATS: int = 7
 WARMUP_RUNS: int = 1
-WORKLOAD_RANGE: list[int] = [0, 200, 2000, 10000]
+# Quiescent gap between consecutive benchmark process launches, so each run
+# starts from a settled system (scheduler drained, CPU frequency relaxed,
+# previous run's cache/turbo residue dissipated) instead of inheriting the
+# state the prior run left behind.
+SETTLE_SEC: float = 0.3
+# Workload = filler NOPs executed while the lock is held, emulating the critical
+# section. At ~0.125 ns/NOP on this class of CPU the powers-of-two range below
+# spans roughly 0-128 ns, densely sampling the regime where spinlocks are
+# actually used: tiny shared-state updates (flag flip ~2 ns, a few struct fields
+# ~4-16 ns) up to a medium CS (~128 ns) where the two locks converge. Anything
+# heavier is the wrong tool for a spinlock, so it is intentionally not sampled.
+WORKLOAD_RANGE: list[int] = [0, 16, 32, 64, 128, 256, 512, 1024]
 BENCHMARK_BIN: Path = Path("./bin/spinlock_test")
 CSV_PATH: Path = Path("bench_results.csv")
 PNG_PATH: Path = Path("bench_result.png")
 
 RE_SPIN = re.compile(r"Custom Hybrid Spinlock \]\s+- Elapsed Time :\s+([\d.]+)")
-RE_MUTEX = re.compile(r"POSIX Mutex\s+\]\s+- Elapsed Time :\s+([\d.]+)")
+RE_PSPIN = re.compile(r"POSIX Spinlock\s+\]\s+- Elapsed Time :\s+([\d.]+)")
 
 SPIN_COLOR = "#1f77b4"
-MUTEX_COLOR = "#ff7f0e"
-SPEEDUP_PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+PSPIN_COLOR = "#ff7f0e"
+# One maximally distinct colour per workload line in the speedup panel. Chosen
+# for guaranteed separability on a white background: every hue is strong and
+# dark enough to read (the old palette repeated after five workloads, and
+# tab10's blue/cyan pair was too close). These are the ColorBrewer "Set1" hues
+# minus its white-invisible yellow, with a dark teal as the eighth.
+SPEEDUP_PALETTE = [
+    "#e41a1c",  # red
+    "#377eb8",  # blue
+    "#4daf4a",  # green
+    "#984ea3",  # purple
+    "#ff7f00",  # orange
+    "#a65628",  # brown
+    "#f781bf",  # pink
+    "#008080",  # teal
+]
+# Distinct marker per line, reinforcing the colour so that where the high-NOP
+# lines bunch up near 1.0x each is still individually identifiable.
+SPEEDUP_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
 
 # Winner colours for the latency candles (Korean stock convention: red = gain).
-WIN_SPIN = "#d62728"   # red  — our spinlock wins (lower median latency)
-WIN_MUTEX = "#1f77b4"  # blue — pthread mutex wins
+WIN_SPIN = "#d62728"   # red  — our custom spinlock wins (lower median latency)
+WIN_PSPIN = "#1f77b4"  # blue — pthread spinlock wins
 LOSE_GRAY = "#b6b9be"  # muted gray — the slower (losing) lock at that thread count
-LABEL_COLOR = {WIN_SPIN: "#a01b1c", WIN_MUTEX: "#155b8a", LOSE_GRAY: "#6b7075"}
+LABEL_COLOR = {WIN_SPIN: "#a01b1c", WIN_PSPIN: "#155b8a", LOSE_GRAY: "#6b7075"}
 
 
 def mad(arr: np.ndarray) -> float:
@@ -92,9 +120,13 @@ def run_bench(threads: int, workload: int) -> tuple[list[float], list[float], in
     iterations = pick_iterations(workload)
     scale = 1_000_000 / iterations
     raw_spin: list[float] = []
-    raw_mutex: list[float] = []
+    raw_pspin: list[float] = []
 
     for run_idx in range(REPEATS + WARMUP_RUNS):
+        # Let the machine settle between launches so one run cannot perturb the
+        # next; skip the wait before the very first launch.
+        if run_idx > 0:
+            time.sleep(SETTLE_SEC)
         cmd = [
             str(BENCHMARK_BIN),
             "-t", str(threads),
@@ -116,17 +148,17 @@ def run_bench(threads: int, workload: int) -> tuple[list[float], list[float], in
             continue
 
         s_m = RE_SPIN.search(res)
-        m_m = RE_MUTEX.search(res)
-        if not (s_m and m_m):
+        p_m = RE_PSPIN.search(res)
+        if not (s_m and p_m):
             continue
 
         if run_idx < WARMUP_RUNS:
             continue
 
         raw_spin.append(float(s_m.group(1)) * scale)
-        raw_mutex.append(float(m_m.group(1)) * scale)
+        raw_pspin.append(float(p_m.group(1)) * scale)
 
-    return raw_spin, raw_mutex, iterations
+    return raw_spin, raw_pspin, iterations
 
 
 def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list[dict],
@@ -149,14 +181,14 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
     print(f"  - Bench Duration  : {duration:.2f} seconds")
     print(sep)
     print(f"{'Workload (NOPs)':<20} | {'Threads':<8} | {'Iters':<10} | "
-          f"{'Spin (ms)':<20} | {'Mutex (ms)':<20} | {'Speedup':<10}")
+          f"{'Custom (ms)':<20} | {'PSpin (ms)':<20} | {'Speedup':<10}")
     print(line)
 
     for d in report_data:
         spin_str = f"{d['spin_med']:.3f} ±{d['spin_mad']:.1f}"
-        mutex_str = f"{d['mutex_med']:.3f} ±{d['mutex_mad']:.1f}"
+        pspin_str = f"{d['pspin_med']:.3f} ±{d['pspin_mad']:.1f}"
         print(f"{d['workload']:<20} | {d['t']:<8} | {d['iters']:<10} | "
-              f"{spin_str:<20} | {mutex_str:<20} | {d['ratio']:.2f}x")
+              f"{spin_str:<20} | {pspin_str:<20} | {d['ratio']:.2f}x")
         if d['t'] == threads_range[-1]:
             print(line)
 
@@ -198,7 +230,7 @@ def _draw_candle(ax: plt.Axes, x: float, arr: np.ndarray, width: float,
 
 
 def plot_results(results_spin_raw: list[list[list[float]]],
-                 results_mutex_raw: list[list[list[float]]],
+                 results_pspin_raw: list[list[list[float]]],
                  results_ratio: np.ndarray, threads_range: list[int],
                  cpu_model: str) -> None:
     n_wl = len(WORKLOAD_RANGE)
@@ -225,25 +257,26 @@ def plot_results(results_spin_raw: list[list[list[float]]],
         panel_hi, panel_lo = 0.0, float("inf")
         for j, _t in enumerate(threads_range):
             spin_arr = np.asarray(results_spin_raw[i][j], dtype=float)
-            mutex_arr = np.asarray(results_mutex_raw[i][j], dtype=float)
-            for arr in (spin_arr, mutex_arr):
+            pspin_arr = np.asarray(results_pspin_raw[i][j], dtype=float)
+            for arr in (spin_arr, pspin_arr):
                 if arr.size:
                     panel_hi = max(panel_hi, float(arr.max()))
                     panel_lo = min(panel_lo, float(arr.min()))
             # Winner at this thread count = lower median latency. Colour the
-            # winner (red = spinlock, blue = mutex) and mute the loser to gray.
+            # winner (red = custom spinlock, blue = pthread spinlock) and mute
+            # the loser to gray.
             spin_med = float(np.median(spin_arr)) if spin_arr.size else float("inf")
-            mutex_med = float(np.median(mutex_arr)) if mutex_arr.size else float("inf")
-            if spin_med < mutex_med:
-                spin_fill, mutex_fill = WIN_SPIN, LOSE_GRAY
-            elif mutex_med < spin_med:
-                spin_fill, mutex_fill = LOSE_GRAY, WIN_MUTEX
+            pspin_med = float(np.median(pspin_arr)) if pspin_arr.size else float("inf")
+            if spin_med < pspin_med:
+                spin_fill, pspin_fill = WIN_SPIN, LOSE_GRAY
+            elif pspin_med < spin_med:
+                spin_fill, pspin_fill = LOSE_GRAY, WIN_PSPIN
             else:
-                spin_fill = mutex_fill = LOSE_GRAY
+                spin_fill = pspin_fill = LOSE_GRAY
             _draw_candle(ax, j - 0.21, spin_arr, 0.34, spin_fill,
                          median_label=True, label_color=LABEL_COLOR[spin_fill])
-            _draw_candle(ax, j + 0.21, mutex_arr, 0.34, mutex_fill,
-                         median_label=True, label_color=LABEL_COLOR[mutex_fill])
+            _draw_candle(ax, j + 0.21, pspin_arr, 0.34, pspin_fill,
+                         median_label=True, label_color=LABEL_COLOR[pspin_fill])
 
         ax.set_xticks(range(n_th))
         ax.set_xticklabels([str(t) for t in threads_range])
@@ -263,14 +296,14 @@ def plot_results(results_spin_raw: list[list[list[float]]],
             legend_handles = [
                 plt.Rectangle((0, 0), 1, 1, facecolor=WIN_SPIN,
                               edgecolor="#111111", label="Spinlock wins"),
-                plt.Rectangle((0, 0), 1, 1, facecolor=WIN_MUTEX,
-                              edgecolor="#111111", label="POSIX Mutex wins"),
+                plt.Rectangle((0, 0), 1, 1, facecolor=WIN_PSPIN,
+                              edgecolor="#111111", label="POSIX Spinlock wins"),
                 plt.Rectangle((0, 0), 1, 1, facecolor=LOSE_GRAY,
                               edgecolor="#111111", label="loser (slower)"),
             ]
             ax.legend(handles=legend_handles, loc="upper left", fontsize=8.5,
                       framealpha=0.95,
-                      title="left bar = Spinlock, right bar = Mutex\n"
+                      title="left bar = Custom spinlock, right bar = POSIX spinlock\n"
                             "body=IQR · wick=min–max · tick=median",
                       title_fontsize=7.5)
 
@@ -278,14 +311,16 @@ def plot_results(results_spin_raw: list[list[list[float]]],
     xpos = list(range(n_th))
     for i, wl in enumerate(WORKLOAD_RANGE):
         c = SPEEDUP_PALETTE[i % len(SPEEDUP_PALETTE)]
+        m = SPEEDUP_MARKERS[i % len(SPEEDUP_MARKERS)]
         ax.plot(xpos, results_ratio[i, :], label=f"{wl} NOPs",
-                color=c, marker="o", lw=2.2, ms=7)
-    ax.axhline(y=1.0, color="red", ls="--", alpha=0.6, lw=1.5,
+                color=c, marker=m, lw=2.2, ms=7.5,
+                markeredgecolor="white", markeredgewidth=0.7)
+    ax.axhline(y=1.0, color="#333333", ls="--", alpha=0.85, lw=1.6,
                label="break-even (1.0x)")
     ax.set_xticks(xpos)
     ax.set_xticklabels([str(t) for t in threads_range])
     ax.set_xlim(-0.3, n_th - 0.7)
-    ax.set_title("Speedup (Mutex / Spinlock) — above 1.0, the spinlock wins",
+    ax.set_title("Speedup (POSIX Spinlock / Custom Spinlock) — above 1.0, the custom spinlock wins",
                  loc="left", fontsize=11, fontweight="bold")
     ax.set_xlabel("Threads")
     ax.set_ylabel("Speedup (x)")
@@ -293,7 +328,7 @@ def plot_results(results_spin_raw: list[list[list[float]]],
     ax.legend(title="Critical-section work (NOPs)", fontsize=9, ncol=3,
               loc="upper right")
 
-    fig.suptitle(f"Spinlock vs POSIX Mutex — {cpu_model}",
+    fig.suptitle(f"Custom Spinlock vs POSIX Spinlock — {cpu_model}",
                  fontsize=14, fontweight="bold", y=0.998)
     fig.text(0.5, 0.008,
              "Critical-section work is emulated with N filler NOP instructions executed while the "
@@ -304,7 +339,7 @@ def plot_results(results_spin_raw: list[list[list[float]]],
 
 
 def write_csv(path: Path, results_spin_raw: list[list[list[float]]],
-              results_mutex_raw: list[list[list[float]]],
+              results_pspin_raw: list[list[list[float]]],
               results_iters: list[list[int]],
               threads_range: list[int]) -> None:
     with path.open("w", newline="") as f:
@@ -316,8 +351,8 @@ def write_csv(path: Path, results_spin_raw: list[list[list[float]]],
                 iters = results_iters[i][j]
                 for k, v in enumerate(results_spin_raw[i][j]):
                     w.writerow([wl, t, "spin", iters, k, f"{v:.6f}"])
-                for k, v in enumerate(results_mutex_raw[i][j]):
-                    w.writerow([wl, t, "mutex", iters, k, f"{v:.6f}"])
+                for k, v in enumerate(results_pspin_raw[i][j]):
+                    w.writerow([wl, t, "pspin", iters, k, f"{v:.6f}"])
 
 
 def load_results_from_csv(
@@ -329,39 +364,56 @@ def load_results_from_csv(
     re-running the benchmark, so the tracked CSV stays the source of truth.
     """
     spin: dict[tuple[int, int], list[float]] = {}
-    mutex: dict[tuple[int, int], list[float]] = {}
+    pspin: dict[tuple[int, int], list[float]] = {}
     threads_set: set[int] = set()
+    unknown_locks: set[str] = set()
 
     with path.open(newline="") as f:
         for row in csv.DictReader(f):
+            lock = row["lock"]
+            # Only the two locks this benchmark produces are accepted. Anything
+            # else (e.g. legacy "mutex" rows from an older CSV) is skipped rather
+            # than silently mislabeled, so stale data cannot be re-rendered under
+            # the wrong legend.
+            if lock == "spin":
+                bucket = spin
+            elif lock == "pspin":
+                bucket = pspin
+            else:
+                unknown_locks.add(lock)
+                continue
             wl = int(row["workload_nops"])
             t = int(row["threads"])
             val = float(row["time_ms_normalized_to_1m_iters"])
             threads_set.add(t)
-            bucket = spin if row["lock"] == "spin" else mutex
             bucket.setdefault((wl, t), []).append(val)
+
+    if unknown_locks:
+        print(f"Warning: {path} contains unrecognized lock label(s) "
+              f"{sorted(unknown_locks)}; those rows were skipped. "
+              f"Re-run a full sweep to regenerate it.", file=sys.stderr)
 
     threads_range = sorted(threads_set)
     n_wl, n_th = len(WORKLOAD_RANGE), len(threads_range)
 
     results_spin_raw = [[spin.get((wl, t), []) for t in threads_range]
                         for wl in WORKLOAD_RANGE]
-    results_mutex_raw = [[mutex.get((wl, t), []) for t in threads_range]
+    results_pspin_raw = [[pspin.get((wl, t), []) for t in threads_range]
                          for wl in WORKLOAD_RANGE]
     results_ratio = np.zeros((n_wl, n_th))
     for i in range(n_wl):
         for j in range(n_th):
-            s, m = results_spin_raw[i][j], results_mutex_raw[i][j]
+            s, p = results_spin_raw[i][j], results_pspin_raw[i][j]
             spin_med = float(np.median(s)) if s else 0.0
-            mutex_med = float(np.median(m)) if m else 0.0
-            results_ratio[i, j] = (mutex_med / spin_med) if spin_med > 0 else 0.0
+            pspin_med = float(np.median(p)) if p else 0.0
+            results_ratio[i, j] = (pspin_med / spin_med) if spin_med > 0 else 0.0
 
-    return results_spin_raw, results_mutex_raw, results_ratio, threads_range
+    return results_spin_raw, results_pspin_raw, results_ratio, threads_range
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Benchmark the hybrid spinlock vs pthread_mutex and plot it.")
+        description="Benchmark the custom hybrid spinlock vs pthread_spin_lock and plot it.")
     parser.add_argument(
         "--plot-only", action="store_true",
         help=f"Skip benchmarking and redraw {PNG_PATH} from an existing "
@@ -378,8 +430,8 @@ def main() -> None:
                   file=sys.stderr)
             sys.exit(1)
         cpu_model = cli.cpu_model or get_cpu_model()
-        rs, rm, rr, threads_range = load_results_from_csv(CSV_PATH)
-        plot_results(rs, rm, rr, threads_range, cpu_model)
+        rs, rp, rr, threads_range = load_results_from_csv(CSV_PATH)
+        plot_results(rs, rp, rr, threads_range, cpu_model)
         print(f"[Done] Re-plotted {PNG_PATH} from {CSV_PATH} "
               f"(no benchmarks run, CSV untouched)")
         return
@@ -399,7 +451,7 @@ def main() -> None:
     n_th = len(threads_range)
 
     results_spin_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
-    results_mutex_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
+    results_pspin_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
     results_iters: list[list[int]] = [[0] * n_th for _ in range(n_wl)]
     results_ratio = np.zeros((n_wl, n_th))
 
@@ -412,25 +464,25 @@ def main() -> None:
 
     for i, wl in enumerate(WORKLOAD_RANGE):
         for j, t in enumerate(threads_range):
-            raw_spin, raw_mutex, iters = run_bench(t, wl)
+            raw_spin, raw_pspin, iters = run_bench(t, wl)
             results_spin_raw[i][j] = raw_spin
-            results_mutex_raw[i][j] = raw_mutex
+            results_pspin_raw[i][j] = raw_pspin
             results_iters[i][j] = iters
 
             spin_arr = np.asarray(raw_spin) if raw_spin else np.zeros(1)
-            mutex_arr = np.asarray(raw_mutex) if raw_mutex else np.zeros(1)
+            pspin_arr = np.asarray(raw_pspin) if raw_pspin else np.zeros(1)
             spin_med = float(np.median(spin_arr))
-            mutex_med = float(np.median(mutex_arr))
+            pspin_med = float(np.median(pspin_arr))
             spin_mad_v = mad(spin_arr) if raw_spin else 0.0
-            mutex_mad_v = mad(mutex_arr) if raw_mutex else 0.0
-            ratio = mutex_med / spin_med if spin_med > 0 else 0.0
+            pspin_mad_v = mad(pspin_arr) if raw_pspin else 0.0
+            ratio = pspin_med / spin_med if spin_med > 0 else 0.0
             results_ratio[i, j] = ratio
 
             total_raw_cycles += iters * REPEATS * t
             report_data.append({
                 "workload": wl, "t": t,
-                "spin_med": spin_med, "mutex_med": mutex_med,
-                "spin_mad": spin_mad_v, "mutex_mad": mutex_mad_v,
+                "spin_med": spin_med, "pspin_med": pspin_med,
+                "spin_mad": spin_mad_v, "pspin_mad": pspin_mad_v,
                 "ratio": ratio, "iters": iters,
             })
 
@@ -445,9 +497,9 @@ def main() -> None:
     duration = time.time() - start_time
     print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
                  total_raw_cycles, duration)
-    plot_results(results_spin_raw, results_mutex_raw, results_ratio,
+    plot_results(results_spin_raw, results_pspin_raw, results_ratio,
                  threads_range, cpu_model)
-    write_csv(CSV_PATH, results_spin_raw, results_mutex_raw,
+    write_csv(CSV_PATH, results_spin_raw, results_pspin_raw,
               results_iters, threads_range)
 
     print(f"[Done] Saved {PNG_PATH} and {CSV_PATH}")

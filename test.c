@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "./spinlock_test.h"
 
@@ -17,6 +18,28 @@
 #define MAX_LOAD INT_MAX
 #define MIN_BACKOFF 1
 #define MAX_BACKOFF (INT_MAX / 2)
+
+/*
+ * Quiescent gap inserted right before each measured benchmark so the system
+ * settles (scheduler drains, CPU frequency relaxes, the previous lock's cache
+ * footprint dissipates) and one lock type cannot bias the next.
+ */
+#define SETTLE_DELAY_MS 100
+
+/*
+ * Cache-line-isolated wrapper for the POSIX spinlock. pthread_spinlock_t is a
+ * bare word, whereas our custom spinlock_t is padded to its own cache line. To
+ * compare the two locks fairly, the POSIX lock must get the same isolation:
+ * without this padding it could share a cache line with the contended counter
+ * on the benchmark stack, so the lock holder's counter write would invalidate
+ * the waiters' cached copy of the lock word on every critical section — extra
+ * coherence traffic that has nothing to do with the lock itself and would
+ * unfairly penalise the POSIX lock. Mirrors the spinlock_t layout exactly.
+ */
+typedef struct {
+    pthread_spinlock_t lock;
+    char cache_line_padding[CACHE_LINE_SIZE - sizeof(pthread_spinlock_t)];
+} __attribute__((aligned(CACHE_LINE_SIZE))) isolated_pspin_t;
 
 int g_conf_iterations = DEFAULT_ITERATIONS;
 int g_conf_load_loops = DEFAULT_LOAD_LOOPS;
@@ -143,36 +166,47 @@ static void parse_args(int argc, char *argv[])
     }
 }
 
+static void settle_between_tests(void)
+{
+    const struct timespec settle_ts = {
+        .tv_sec = SETTLE_DELAY_MS / 1000,
+        .tv_nsec = (long)(SETTLE_DELAY_MS % 1000) * 1000000L
+    };
+    nanosleep(&settle_ts, NULL);
+}
+
 static double run_benchmark(const char *name, void *(*task_routine)(void *))
 {
-    pthread_mutex_t local_mutex;
+    isolated_pspin_t local_pspin;
     spinlock_t local_spinlock;
     pthread_barrier_t barrier;
     struct thread_ctx ctx;
     struct timespec start, end;
     long long local_counter = 0;
 
+    settle_between_tests();
+
     spin_init(&local_spinlock);
-    if (pthread_mutex_init(&local_mutex, NULL) != 0) {
-        perror("pthread_mutex_init");
+    if (pthread_spin_init(&local_pspin.lock, PTHREAD_PROCESS_PRIVATE) != 0) {
+        perror("pthread_spin_init");
         exit(EXIT_FAILURE);
     }
     if (pthread_barrier_init(&barrier, NULL, g_conf_nthreads + 1) != 0) {
         perror("pthread_barrier_init");
-        pthread_mutex_destroy(&local_mutex);
+        pthread_spin_destroy(&local_pspin.lock);
         exit(EXIT_FAILURE);
     }
 
     ctx.shared_counter = &local_counter;
     ctx.spinlock = &local_spinlock;
-    ctx.mutex = &local_mutex;
+    ctx.pthread_spin = &local_pspin.lock;
     ctx.barrier = &barrier;
 
     pthread_t *threads = calloc(g_conf_nthreads, sizeof(*threads));
     if (!threads) {
         perror("calloc");
         pthread_barrier_destroy(&barrier);
-        pthread_mutex_destroy(&local_mutex);
+        pthread_spin_destroy(&local_pspin.lock);
         exit(EXIT_FAILURE);
     }
 
@@ -203,7 +237,7 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
            name, elapsed_ms, local_counter, expected, status);
 
     pthread_barrier_destroy(&barrier);
-    pthread_mutex_destroy(&local_mutex);
+    pthread_spin_destroy(&local_pspin.lock);
     free(threads);
 
     return elapsed_ms;
@@ -211,7 +245,6 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
 
 static void run_warmup(void)
 {
-    pthread_mutex_t local_mutex;
     spinlock_t local_spinlock;
     pthread_barrier_t barrier;
     struct thread_ctx ctx;
@@ -222,19 +255,17 @@ static void run_warmup(void)
     g_conf_iterations = (warmup_iters > 0) ? warmup_iters : 1;
 
     spin_init(&local_spinlock);
-    pthread_mutex_init(&local_mutex, NULL);
     pthread_barrier_init(&barrier, NULL, g_conf_nthreads + 1);
 
     ctx.shared_counter = &local_counter;
     ctx.spinlock = &local_spinlock;
-    ctx.mutex = &local_mutex;
+    ctx.pthread_spin = NULL;
     ctx.barrier = &barrier;
 
     pthread_t *threads = calloc(g_conf_nthreads, sizeof(*threads));
     if (!threads) {
         g_conf_iterations = saved_iters;
         pthread_barrier_destroy(&barrier);
-        pthread_mutex_destroy(&local_mutex);
         return;
     }
 
@@ -243,7 +274,6 @@ static void run_warmup(void)
             free(threads);
             g_conf_iterations = saved_iters;
             pthread_barrier_destroy(&barrier);
-            pthread_mutex_destroy(&local_mutex);
             return;
         }
     }
@@ -254,7 +284,6 @@ static void run_warmup(void)
     }
 
     pthread_barrier_destroy(&barrier);
-    pthread_mutex_destroy(&local_mutex);
     free(threads);
     g_conf_iterations = saved_iters;
 }
@@ -266,6 +295,22 @@ int main(int argc, char *argv[])
     detect_system_topology();
     parse_args(argc, argv);
 
+    /*
+     * Best-effort: pin the resident working set into RAM so a page fault or
+     * swap-out cannot perturb a measurement. MCL_CURRENT only (not MCL_FUTURE):
+     * locking future allocations would also lock every worker thread stack and
+     * exceed RLIMIT_MEMLOCK on typical hosts, failing pthread_create. A failure
+     * here is non-fatal and only means results may carry slightly more noise.
+     */
+    const char *mlock_status = "locked (MCL_CURRENT)";
+    if (mlockall(MCL_CURRENT) != 0) {
+        mlock_status = "unavailable";
+        fprintf(stderr,
+                "[WARNING] mlockall(MCL_CURRENT) failed: %s\n"
+                "  Measurements may carry more variance from page faults.\n\n",
+                strerror(errno));
+    }
+
     printf("\n--- SPINLOCK BENCHMARK SUITE START ---\n"
            "System Info:\n"
            "  L1 Cache Line  : %ld bytes\n"
@@ -274,18 +319,20 @@ int main(int argc, char *argv[])
            "  Iterations     : %d\n"
            "  Dummy Tasks    : %d\n"
            "  Backoff Range  : %d ~ %d\n"
+           "  Settle Delay   : %d ms (between tests)\n"
+           "  Memory Lock    : %s\n"
            "--------------------------------------\n\n",
            g_sys_cache_line_size, g_conf_nthreads, g_conf_iterations, g_conf_load_loops,
-           g_conf_spin_min, g_conf_spin_max);
+           g_conf_spin_min, g_conf_spin_max, SETTLE_DELAY_MS, mlock_status);
 
     run_warmup();
 
     const double t_spin = run_benchmark("Custom Hybrid Spinlock", task_spinlock);
     printf("\n");
-    const double t_mutex = run_benchmark("POSIX Mutex", task_mutex);
+    const double t_pthread = run_benchmark("POSIX Spinlock", task_pthread_spin);
 
-    const double speedup = t_mutex / t_spin;
-    const char *winner = (t_spin < t_mutex) ? "Custom Spinlock" : "POSIX Mutex";
+    const double speedup = t_pthread / t_spin;
+    const char *winner = (t_spin < t_pthread) ? "Custom Spinlock" : "POSIX Spinlock";
     printf("\n--------------------------------------\n"
            "FINAL RESULT:\n"
            "  Speedup Factor : %.2fx\n"

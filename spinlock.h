@@ -83,8 +83,9 @@ static inline void spin_lock(spinlock_t *lock)
 
         /*
          * Reset 'expected' to UNLOCKED before every attempt. A failed CAS
-         * overwrites it with the lock's current value (x86 'cmpxchg' leaves
-         * it in EAX, arm64 'ldaxr' loads it into the output register), so the
+         * overwrites it with the lock's current value (x86 'cmpxchg' leaves it
+         * in EAX, arm64 'ldaxr' loads it into the output register, and arm64
+         * LSE 'casa' always writes the prior value back into it), so the
          * comparison baseline must be reloaded for the next try.
          */
         expected = IS_SPINLOCK_UNLOCKED;
@@ -101,8 +102,29 @@ static inline void spin_lock(spinlock_t *lock)
                      : "r"(desired)
                      : "memory");
 #elif defined(__aarch64__)
+#if defined(__ARM_FEATURE_ATOMICS)
         /*
-         * Test-and-Set (Atomic CAS) on weakly-ordered arm64.
+         * Test-and-Set via the ARMv8.1-A LSE atomics extension.
+         * 'casa' is a single-instruction load-ACQUIRE compare-and-swap:
+         *   - it compares memory (%[mem]) against 'expected' (preloaded to
+         *     UNLOCKED above),
+         *   - if they match it stores 'desired' (LOCKED),
+         *   - and it ALWAYS writes the prior memory value back into 'expected'.
+         * The acquire variant establishes the critical-section ordering, so
+         * unlike the LL/SC fallback there is no exclusive monitor to lose and
+         * no retry loop. This scales far better under heavy contention on
+         * high-core-count machines. Selected only when the toolchain targets an
+         * LSE-capable CPU (build with e.g. -march=armv8.1-a or
+         * -march=armv8-a+lse); otherwise __ARM_FEATURE_ATOMICS is undefined and
+         * the ldaxr/stlxr path below is emitted instead.
+         */
+        asm volatile("casa %w[exp], %w[des], %[mem]"
+                     : [exp] "+r"(expected), [mem] "+Q"(lock->is_locked)
+                     : [des] "r"(desired)
+                     : "memory");
+#else
+        /*
+         * Test-and-Set (Atomic CAS) on weakly-ordered arm64 without LSE.
          * 'ldaxr' is a load-ACQUIRE exclusive, so a successful acquire also
          * establishes acquire ordering for the critical section. The LL/SC
          * pair retries only when the exclusive reservation is lost; a value
@@ -123,6 +145,7 @@ static inline void spin_lock(spinlock_t *lock)
                          : [exp] "r"(IS_SPINLOCK_UNLOCKED), [des] "r"(desired)
                          : "memory", "cc");
         }
+#endif
 #endif
 
         /*

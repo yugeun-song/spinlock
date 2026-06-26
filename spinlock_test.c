@@ -42,7 +42,7 @@ void *task_spinlock(void *arg)
     return NULL;
 }
 
-void *task_mutex(void *arg)
+void *task_pthread_spin(void *arg)
 {
     struct thread_ctx *ctx = (struct thread_ctx *)arg;
 
@@ -53,19 +53,19 @@ void *task_mutex(void *arg)
     const int iters = g_conf_iterations;
     const int loops = g_conf_load_loops;
     long long *const counter = ctx->shared_counter;
-    pthread_mutex_t *const mutex = ctx->mutex;
+    pthread_spinlock_t *const lock = ctx->pthread_spin;
 
     pthread_barrier_wait(ctx->barrier);
 
     for (int i = 0; i < iters; ++i) {
-        pthread_mutex_lock(mutex);
+        pthread_spin_lock(lock);
         *counter += 1;
 
         for (int j = 0; j < loops; ++j) {
             asm volatile("nop" : : : "memory");
         }
 
-        pthread_mutex_unlock(mutex);
+        pthread_spin_unlock(lock);
     }
 
     return NULL;
