@@ -13,7 +13,7 @@ double calc_time_diff_ms(const struct timespec *start, const struct timespec *en
     return (double)elapsed_ns / 1000000.0;
 }
 
-void *task_spinlock(void *arg)
+void *task_spinlock_ttas(void *arg)
 {
     struct thread_ctx *ctx = (struct thread_ctx *)arg;
 
@@ -24,19 +24,48 @@ void *task_spinlock(void *arg)
     const int iters = g_conf_iterations;
     const int loops = g_conf_load_loops;
     long long *const counter = ctx->shared_counter;
-    spinlock_t *const lock = ctx->spinlock;
+    spinlock_ttas_t *const lock = ctx->spinlock_ttas;
 
     pthread_barrier_wait(ctx->barrier);
 
     for (int i = 0; i < iters; ++i) {
-        spin_lock(lock);
+        spin_lock_ttas(lock);
         *counter += 1;
 
         for (int j = 0; j < loops; ++j) {
             asm volatile("nop" : : : "memory");
         }
 
-        spin_unlock(lock);
+        spin_unlock_ttas(lock);
+    }
+
+    return NULL;
+}
+
+void *task_spinlock_mcs(void *arg)
+{
+    struct thread_ctx *ctx = (struct thread_ctx *)arg;
+
+    if (!ctx) {
+        return NULL;
+    }
+
+    const int iters = g_conf_iterations;
+    const int loops = g_conf_load_loops;
+    long long *const counter = ctx->shared_counter;
+    spinlock_mcs_t *const lock = ctx->spinlock_mcs;
+
+    pthread_barrier_wait(ctx->barrier);
+
+    for (int i = 0; i < iters; ++i) {
+        spin_lock_mcs(lock);
+        *counter += 1;
+
+        for (int j = 0; j < loops; ++j) {
+            asm volatile("nop" : : : "memory");
+        }
+
+        spin_unlock_mcs(lock);
     }
 
     return NULL;

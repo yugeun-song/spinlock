@@ -18,13 +18,15 @@ extern int g_conf_nthreads;
 
 struct thread_ctx {
     long long *shared_counter;
-    spinlock_t *spinlock;
+    spinlock_ttas_t *spinlock_ttas;
+    spinlock_mcs_t *spinlock_mcs;
     pthread_spinlock_t *pthread_spin;
     pthread_barrier_t *barrier;
 };
 
 double calc_time_diff_ms(const struct timespec *start, const struct timespec *end);
-void *task_spinlock(void *arg);
+void *task_spinlock_ttas(void *arg);
+void *task_spinlock_mcs(void *arg);
 void *task_pthread_spin(void *arg);
 
 #endif
