@@ -10,11 +10,8 @@ import sys
 import time
 from pathlib import Path
 
-import matplotlib
+import json
 
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -35,43 +32,11 @@ WORKLOAD_RANGE: list[int] = [0, 16, 32, 64, 128, 256, 512, 1024]
 BENCHMARK_BIN: Path = Path("./bin/spinlock_test")
 CSV_PATH: Path = Path("bench_results.csv")
 PNG_PATH: Path = Path("bench_result.png")
+META_PATH: Path = Path("bench_meta.json")
 
 RE_TTAS = re.compile(r"Custom TTAS Spinlock\s+\]\s+- Elapsed Time :\s+([\d.]+)")
 RE_MCS = re.compile(r"Custom MCS Spinlock\s+\]\s+- Elapsed Time :\s+([\d.]+)")
 RE_PSPIN = re.compile(r"POSIX Spinlock\s+\]\s+- Elapsed Time :\s+([\d.]+)")
-
-SPIN_COLOR = "#1f77b4"
-PSPIN_COLOR = "#ff7f0e"
-# One maximally distinct colour per workload line in the speedup panel. Chosen
-# for guaranteed separability on a white background: every hue is strong and
-# dark enough to read (the old palette repeated after five workloads, and
-# tab10's blue/cyan pair was too close). These are the ColorBrewer "Set1" hues
-# minus its white-invisible yellow, with a dark teal as the eighth.
-SPEEDUP_PALETTE = [
-    "#e41a1c",  # red
-    "#377eb8",  # blue
-    "#4daf4a",  # green
-    "#984ea3",  # purple
-    "#ff7f00",  # orange
-    "#a65628",  # brown
-    "#f781bf",  # pink
-    "#008080",  # teal
-]
-# Distinct marker per line, reinforcing the colour so that where the high-NOP
-# lines bunch up near 1.0x each is still individually identifiable.
-SPEEDUP_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
-
-# One fixed colour per lock for the latency candles. With three contenders the
-# old "colour the winner, gray the loser" scheme no longer distinguishes the two
-# non-winners, so each lock keeps a stable identity instead and the winner at a
-# given thread count is marked with a thick black candle border.
-TTAS_COLOR = "#d62728"   # red   — custom TTAS spinlock
-MCS_COLOR = "#2ca02c"    # green — custom MCS spinlock
-PSPIN_COLOR2 = "#1f77b4" # blue  — POSIX pthread_spin_lock
-LOCK_ORDER = ["ttas", "mcs", "pspin"]
-LOCK_COLOR = {"ttas": TTAS_COLOR, "mcs": MCS_COLOR, "pspin": PSPIN_COLOR2}
-LOCK_NAME = {"ttas": "Custom TTAS", "mcs": "Custom MCS", "pspin": "POSIX Spinlock"}
-LABEL_COLOR = {TTAS_COLOR: "#a01b1c", MCS_COLOR: "#1f7a1f", PSPIN_COLOR2: "#155b8a"}
 
 
 def mad(arr: np.ndarray) -> float:
@@ -243,153 +208,6 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
             print(line)
 
 
-def _draw_candle(ax: plt.Axes, x: float, arr: np.ndarray, width: float,
-                 color: str, *, label: str | None = None,
-                 median_label: bool = False, label_color: str | None = None,
-                 winner: bool = False) -> None:
-    """OHLC-style candle: body = IQR (Q1..Q3), wick = min..max, tick = median.
-
-    The winner (lowest median at this thread count) gets a thick black border so
-    it reads at a glance among the three fixed-colour contenders.
-    """
-    if arr.size == 0:
-        return
-    q1 = float(np.percentile(arr, 25))
-    q3 = float(np.percentile(arr, 75))
-    med = float(np.median(arr))
-    lo = float(arr.min())
-    hi = float(arr.max())
-
-    # Wick: the min..max noise envelope.
-    ax.plot([x, x], [lo, hi], color="#1a1a1a", lw=1.4, zorder=4,
-            solid_capstyle="round")
-    # Body: the inter-quartile range, drawn opaque with a crisp dark border so
-    # adjacent candles never blur together.
-    body_h = max(q3 - q1, med * 2e-3, 1e-9)
-    ax.add_patch(plt.Rectangle(
-        (x - width / 2, q1), width, body_h,
-        facecolor=color, edgecolor="#000000" if winner else "#111111",
-        lw=2.8 if winner else 1.5, alpha=1.0,
-        zorder=5.5 if winner else 5, label=label,
-    ))
-    # Median tick: a white halo under a black core so the headline number stays
-    # legible on top of the coloured body.
-    ax.plot([x - width / 2, x + width / 2], [med, med],
-            color="white", lw=3.2, zorder=6, solid_capstyle="butt")
-    ax.plot([x - width / 2, x + width / 2], [med, med],
-            color="black", lw=1.4, zorder=7, solid_capstyle="butt")
-    if median_label:
-        txt = f"{med:.0f}" if med >= 100 else f"{med:.1f}"
-        ax.annotate(txt, xy=(x, hi), xytext=(0, 3), textcoords="offset points",
-                    ha="center", va="bottom", fontsize=6.5,
-                    color=label_color or color, fontweight="bold", zorder=8)
-
-
-def plot_results(results_ttas_raw: list[list[list[float]]],
-                 results_mcs_raw: list[list[list[float]]],
-                 results_pspin_raw: list[list[list[float]]],
-                 results_ratio: np.ndarray, threads_range: list[int],
-                 cpu_model: str, pin_desc: str) -> None:
-    n_wl = len(WORKLOAD_RANGE)
-    n_th = len(threads_range)
-    ncols = 2 if n_wl > 1 else 1
-    nrows = (n_wl + ncols - 1) // ncols
-
-    fig = plt.figure(figsize=(7.4 * ncols, 4.2 * nrows + 4.0))
-    gs = fig.add_gridspec(nrows + 1, ncols,
-                          height_ratios=[1.0] * nrows + [0.95],
-                          hspace=0.34, wspace=0.16)
-
-    for i, wl in enumerate(WORKLOAD_RANGE):
-        ax = fig.add_subplot(gs[i // ncols, i % ncols])
-        ax.set_axisbelow(True)
-        # Give every thread count its own lane: an alternating background band
-        # plus a separator line so neighbouring candle pairs are unmistakably
-        # distinct groups.
-        for j in range(n_th):
-            if j % 2 == 1:
-                ax.axvspan(j - 0.5, j + 0.5, color="#4c4c4c", alpha=0.06, zorder=0)
-            if j < n_th - 1:
-                ax.axvline(j + 0.5, color="#d0d0d0", lw=0.9, zorder=1)
-        panel_hi, panel_lo = 0.0, float("inf")
-        raw_by_lock = {"ttas": results_ttas_raw, "mcs": results_mcs_raw,
-                       "pspin": results_pspin_raw}
-        cand_off = {"ttas": -0.26, "mcs": 0.0, "pspin": 0.26}
-        for j, _t in enumerate(threads_range):
-            arrs = {k: np.asarray(raw_by_lock[k][i][j], dtype=float) for k in LOCK_ORDER}
-            for arr in arrs.values():
-                if arr.size:
-                    panel_hi = max(panel_hi, float(arr.max()))
-                    panel_lo = min(panel_lo, float(arr.min()))
-            # Winner at this thread count = lowest median latency; it gets the
-            # thick border. Each lock keeps its fixed colour so the three stay
-            # individually identifiable.
-            meds = {k: (float(np.median(a)) if a.size else float("inf"))
-                    for k, a in arrs.items()}
-            winner = min(meds, key=meds.get)
-            for k in LOCK_ORDER:
-                _draw_candle(ax, j + cand_off[k], arrs[k], 0.24, LOCK_COLOR[k],
-                             median_label=True, label_color=LABEL_COLOR[LOCK_COLOR[k]],
-                             winner=(k == winner and meds[k] != float("inf")))
-
-        ax.set_xticks(range(n_th))
-        ax.set_xticklabels([str(t) for t in threads_range])
-        ax.set_xlim(-0.6, n_th - 0.4)
-        ax.set_yscale("log")
-        if panel_hi > 0.0 and panel_lo < float("inf"):
-            # Headroom on the log axis so the tallest candle and its median
-            # label clear the top frame instead of colliding with it.
-            ax.set_ylim(panel_lo / 1.7, panel_hi * 2.6)
-        ax.set_ylabel("Time (ms, log)")
-        ax.set_xlabel("Threads")
-        ax.set_title(f"Critical-section work = {wl} NOPs", loc="left",
-                     fontsize=11, fontweight="bold")
-        ax.grid(True, axis="y", which="major", ls="--", alpha=0.45)
-        ax.grid(True, axis="y", which="minor", ls=":", alpha=0.2)
-        if i == 0:
-            legend_handles = [
-                plt.Rectangle((0, 0), 1, 1, facecolor=LOCK_COLOR[k],
-                              edgecolor="#111111", label=LOCK_NAME[k])
-                for k in LOCK_ORDER
-            ]
-            ax.legend(handles=legend_handles, loc="upper left", fontsize=8.5,
-                      framealpha=0.95,
-                      title="bars per group: TTAS · MCS · POSIX (left to right)\n"
-                            "body=IQR · wick=min–max · tick=median · bold border=winner",
-                      title_fontsize=7.5)
-
-    ax = fig.add_subplot(gs[nrows, :])
-    xpos = list(range(n_th))
-    for i, wl in enumerate(WORKLOAD_RANGE):
-        c = SPEEDUP_PALETTE[i % len(SPEEDUP_PALETTE)]
-        m = SPEEDUP_MARKERS[i % len(SPEEDUP_MARKERS)]
-        ax.plot(xpos, results_ratio[i, :], label=f"{wl} NOPs",
-                color=c, marker=m, lw=2.2, ms=7.5,
-                markeredgecolor="white", markeredgewidth=0.7)
-    ax.axhline(y=1.0, color="#333333", ls="--", alpha=0.85, lw=1.6,
-               label="break-even (1.0x)")
-    ax.set_xticks(xpos)
-    ax.set_xticklabels([str(t) for t in threads_range])
-    ax.set_xlim(-0.3, n_th - 0.7)
-    ax.set_title("Speedup (POSIX Spinlock / Custom TTAS) — above 1.0, the custom TTAS lock wins",
-                 loc="left", fontsize=11, fontweight="bold")
-    ax.set_xlabel("Threads")
-    ax.set_ylabel("Speedup (x)")
-    ax.grid(True, ls="--", alpha=0.4)
-    ax.legend(title="Critical-section work (NOPs)", fontsize=9, ncol=3,
-              loc="upper right")
-
-    fig.suptitle(f"Custom TTAS vs Custom MCS vs POSIX Spinlock — {cpu_model}",
-                 fontsize=14, fontweight="bold", y=0.998)
-    fig.text(0.5, 0.008,
-             "Critical-section work is emulated with N filler NOP instructions executed while the "
-             "lock is held (NOP = no-op: burns cycles, does no real work).   "
-             f"Pinning: {pin_desc}.",
-             ha="center", fontsize=9, color="#555555", style="italic")
-    fig.savefig(PNG_PATH, dpi=170, bbox_inches="tight")
-    plt.close(fig)
-
-
 def write_csv(path: Path, results_ttas_raw: list[list[list[float]]],
               results_mcs_raw: list[list[list[float]]],
               results_pspin_raw: list[list[list[float]]],
@@ -410,75 +228,41 @@ def write_csv(path: Path, results_ttas_raw: list[list[list[float]]],
                     w.writerow([wl, t, "pspin", iters, k, f"{v:.6f}"])
 
 
-def load_results_from_csv(
-    path: Path,
-) -> tuple[list[list[list[float]]], list[list[list[float]]], list[list[list[float]]],
-           np.ndarray, list[int]]:
-    """Rebuild the nested raw-result structure (and median speedups) from a CSV.
+def write_meta(path: Path, cpu_model: str, pin_cores: list[int],
+               threads_range: list[int], num_cpus: int) -> None:
+    """Sidecar so the plot can disclose the run context (pinned core budget, CPU
+    label) without re-deriving it from the CSV."""
+    meta = {
+        "cpu_model": cpu_model,
+        "cores_pinned": len(pin_cores) if pin_cores else num_cpus,
+        "pin_desc": pin_desc_str(pin_cores),
+        "threads_range": threads_range,
+    }
+    path.write_text(json.dumps(meta, indent=2) + "\n")
 
-    Lets the plot be regenerated from a committed measurement set without
-    re-running the benchmark, so the tracked CSV stays the source of truth.
-    """
-    ttas: dict[tuple[int, int], list[float]] = {}
-    mcs: dict[tuple[int, int], list[float]] = {}
-    pspin: dict[tuple[int, int], list[float]] = {}
-    threads_set: set[int] = set()
-    unknown_locks: set[str] = set()
 
-    with path.open(newline="") as f:
-        for row in csv.DictReader(f):
-            lock = row["lock"]
-            # Only the three locks this benchmark produces are accepted; "spin"
-            # is honoured as the legacy label for the TTAS lock so older CSVs
-            # still plot. Anything else (e.g. a stale "mutex" row) is skipped
-            # rather than silently mislabeled.
-            if lock in ("ttas", "spin"):
-                bucket = ttas
-            elif lock == "mcs":
-                bucket = mcs
-            elif lock == "pspin":
-                bucket = pspin
-            else:
-                unknown_locks.add(lock)
-                continue
-            wl = int(row["workload_nops"])
-            t = int(row["threads"])
-            val = float(row["time_ms_normalized_to_1m_iters"])
-            threads_set.add(t)
-            bucket.setdefault((wl, t), []).append(val)
-
-    if unknown_locks:
-        print(f"Warning: {path} contains unrecognized lock label(s) "
-              f"{sorted(unknown_locks)}; those rows were skipped. "
-              f"Re-run a full sweep to regenerate it.", file=sys.stderr)
-
-    threads_range = sorted(threads_set)
-    n_wl, n_th = len(WORKLOAD_RANGE), len(threads_range)
-
-    results_ttas_raw = [[ttas.get((wl, t), []) for t in threads_range]
-                        for wl in WORKLOAD_RANGE]
-    results_mcs_raw = [[mcs.get((wl, t), []) for t in threads_range]
-                       for wl in WORKLOAD_RANGE]
-    results_pspin_raw = [[pspin.get((wl, t), []) for t in threads_range]
-                         for wl in WORKLOAD_RANGE]
-    results_ratio = np.zeros((n_wl, n_th))
-    for i in range(n_wl):
-        for j in range(n_th):
-            s, p = results_ttas_raw[i][j], results_pspin_raw[i][j]
-            ttas_med = float(np.median(s)) if s else 0.0
-            pspin_med = float(np.median(p)) if p else 0.0
-            results_ratio[i, j] = (pspin_med / ttas_med) if ttas_med > 0 else 0.0
-
-    return results_ttas_raw, results_mcs_raw, results_pspin_raw, results_ratio, threads_range
+def render_dashboard(cpu_model: str | None) -> bool:
+    """Delegate visualisation to the standalone plot module. Imported lazily so a
+    headless benchmark run still writes the CSV/meta even without matplotlib."""
+    try:
+        import plot
+    except ImportError as exc:
+        print(f"Warning: skipped plotting ({exc}); {CSV_PATH} still written. "
+              f"Install matplotlib, then run 'python3 plot.py'.", file=sys.stderr)
+        return False
+    plot.render(CSV_PATH, PNG_PATH, cpu_model, META_PATH)
+    return True
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Benchmark the custom hybrid spinlock vs pthread_spin_lock and plot it.")
+        description="Benchmark the custom spinlocks vs pthread_spin_lock; writes "
+                    "the CSV/meta and renders the dashboard via plot.py.")
     parser.add_argument(
         "--plot-only", action="store_true",
         help=f"Skip benchmarking and redraw {PNG_PATH} from an existing "
-             f"{CSV_PATH} (the CSV is read, never modified).")
+             f"{CSV_PATH} by delegating to plot.py (the CSV is read, never "
+             f"modified). Equivalent to running 'python3 plot.py'.")
     parser.add_argument(
         "--cpu-model", default=None,
         help="Override the CPU label in the plot title; useful with --plot-only "
@@ -494,11 +278,10 @@ def main() -> None:
             print(f"Error: {CSV_PATH} not found; run a full sweep first.",
                   file=sys.stderr)
             sys.exit(1)
-        cpu_model = cli.cpu_model or get_cpu_model()
-        rt, rm, rp, rr, threads_range = load_results_from_csv(CSV_PATH)
-        plot_results(rt, rm, rp, rr, threads_range, cpu_model, "from CSV")
-        print(f"[Done] Re-plotted {PNG_PATH} from {CSV_PATH} "
-              f"(no benchmarks run, CSV untouched)")
+        # cpu_model=None lets plot.py read bench_meta.json (or fall back).
+        if render_dashboard(cli.cpu_model):
+            print(f"[Done] Re-plotted {PNG_PATH} from {CSV_PATH} "
+                  f"(no benchmarks run, CSV untouched)")
         return
 
     if not os.access(BENCHMARK_BIN, os.X_OK):
@@ -525,7 +308,6 @@ def main() -> None:
     results_mcs_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
     results_pspin_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
     results_iters: list[list[int]] = [[0] * n_th for _ in range(n_wl)]
-    results_ratio = np.zeros((n_wl, n_th))
 
     total_steps = n_wl * n_th
     current_step = 0
@@ -553,7 +335,6 @@ def main() -> None:
             mcs_med = float(np.median(np.asarray(raw_mcs))) if raw_mcs else None
             mcs_mad_v = mad(np.asarray(raw_mcs)) if raw_mcs else None
             ratio = pspin_med / ttas_med if ttas_med > 0 else 0.0
-            results_ratio[i, j] = ratio
 
             total_raw_cycles += iters * REPEATS * t
             report_data.append({
@@ -574,12 +355,14 @@ def main() -> None:
     duration = time.time() - start_time
     print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
                  total_raw_cycles, duration, pin_desc)
-    plot_results(results_ttas_raw, results_mcs_raw, results_pspin_raw, results_ratio,
-                 threads_range, cpu_model, pin_desc)
+    # Write the CSV/meta first, then render from them, so the committed data is
+    # the single source of truth and the PNG always matches the tracked CSV.
     write_csv(CSV_PATH, results_ttas_raw, results_mcs_raw, results_pspin_raw,
               results_iters, threads_range)
+    write_meta(META_PATH, cpu_model, pin_cores, threads_range, num_cpus)
+    render_dashboard(cpu_model)
 
-    print(f"[Done] Saved {PNG_PATH} and {CSV_PATH}")
+    print(f"[Done] Saved {PNG_PATH}, {CSV_PATH}, and {META_PATH}")
 
 
 if __name__ == "__main__":

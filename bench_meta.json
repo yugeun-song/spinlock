@@ -1,0 +1,6 @@
+{
+  "cpu_model": "Intel Core Ultra 5 226V",
+  "cores_pinned": 4,
+  "pin_desc": "4 P-cores",
+  "threads_range": [1, 2, 4, 8]
+}
