@@ -55,7 +55,7 @@ ACCENT = "#2dbdb6"      # accent-turquoise — sparing KPI accent
 
 # One colour per lock, from the trading-semantics tokens (up / down / info).
 # Reinforced with a distinct marker each so identity is never colour-alone.
-LOCKS = ["ttas", "mcs", "pspin"]
+LOCKS = ["mcs", "ttas", "pspin"]  # legend/draw order: red → green → blue
 COLOR = {"ttas": "#0ecb81", "mcs": "#f6465d", "pspin": "#3b82f6"}
 MARKER = {"ttas": "o", "mcs": "s", "pspin": "^"}
 NAME = {"ttas": "Custom TTAS", "mcs": "Custom MCS", "pspin": "POSIX Spinlock"}
