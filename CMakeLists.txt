@@ -12,7 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
-set(SRCS spinlock_test.c test.c)
+set(SRCS spinlock_test.c main.c)
 
 set(COMMON_OPTS
     -Wall

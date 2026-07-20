@@ -1,6 +1,6 @@
 CC ?= gcc
 BIN_DIR := bin
-SRCS := spinlock_test.c test.c
+SRCS := spinlock_test.c main.c
 
 TARGET_RELEASE := $(BIN_DIR)/spinlock_test
 TARGET_TRACE := $(BIN_DIR)/spinlock_test_trace

@@ -66,7 +66,7 @@ A fully static binary (no sysroot needed to run under QEMU) can be built directl
 
 ```bash
 aarch64-linux-gnu-gcc -O3 -std=gnu99 -Wall -Wextra -static -march=armv8.1-a \
-    spinlock_test.c test.c -o spinlock_test_arm64_lse -pthread -lrt
+    spinlock_test.c main.c -o spinlock_test_arm64_lse -pthread -lrt
 ```
 
 Confirm which path was compiled in by disassembling: `casa`/`swpal` means the LSE path, `ldaxr`/`stlxr` means the LL/SC fallback.

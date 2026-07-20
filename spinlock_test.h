@@ -1,8 +1,7 @@
 #ifndef SPINLOCK_TEST_H
 #define SPINLOCK_TEST_H
 
-#include <pthread.h>
-#include <time.h>
+#include <limits.h>
 
 #include "./spinlock.h"
 
@@ -12,21 +11,42 @@
 #define DEFAULT_SPIN_MIN 4
 #define DEFAULT_SPIN_MAX 16000
 
-extern int g_conf_iterations;
-extern int g_conf_load_loops;
-extern int g_conf_nthreads;
+#define MIN_THREADS 1
+#define MAX_THREADS 1024
+#define MIN_ITERS 1
+#define MAX_ITERS INT_MAX
+#define MIN_LOAD 0
+#define MAX_LOAD INT_MAX
+#define MIN_BACKOFF 1
+#define MAX_BACKOFF (INT_MAX / 2)
 
-struct thread_ctx {
-    long long *shared_counter;
-    spinlock_ttas_t *spinlock_ttas;
-    spinlock_mcs_t *spinlock_mcs;
-    pthread_spinlock_t *pthread_spin;
-    pthread_barrier_t *barrier;
+/*
+ * Quiescent gap inserted right before each measured benchmark so the system
+ * settles (scheduler drains, CPU frequency relaxes, the previous lock's cache
+ * footprint dissipates) and one lock type cannot bias the next.
+ */
+#define SETTLE_DELAY_MS 100
+
+struct bench_results {
+    double ttas_ms;
+    double mcs_ms;
+    double pspin_ms;
 };
 
-double calc_time_diff_ms(const struct timespec *start, const struct timespec *end);
-void *task_spinlock_ttas(void *arg);
-void *task_spinlock_mcs(void *arg);
-void *task_pthread_spin(void *arg);
+void bench_detect_topology(void);
+
+void bench_parse_args(int argc, char *argv[]);
+
+void bench_lock_memory(void);
+
+void bench_print_config(void);
+
+void bench_warmup_all(void);
+
+void bench_run_all(struct bench_results *results);
+
+void bench_print_summary(const struct bench_results *results);
+
+void bench_cleanup(void);
 
 #endif
