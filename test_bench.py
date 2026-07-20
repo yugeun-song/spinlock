@@ -14,7 +14,6 @@ import json
 
 import numpy as np
 
-
 REPEATS: int = 7
 WARMUP_RUNS: int = 1
 # Quiescent gap between consecutive benchmark process launches, so each run
@@ -28,7 +27,7 @@ SETTLE_SEC: float = 0.3
 # actually used: tiny shared-state updates (flag flip ~2 ns, a few struct fields
 # ~4-16 ns) up to a medium CS (~128 ns) where the two locks converge. Anything
 # heavier is the wrong tool for a spinlock, so it is intentionally not sampled.
-WORKLOAD_RANGE: list[int] = [0, 16, 32, 64, 128, 256, 512, 1024]
+WORKLOAD_RANGE: list[int] = [ 0, 16, 32, 64, 128, 256, 512, 1024 ]
 BENCHMARK_BIN: Path = Path("./bin/spinlock_test")
 CSV_PATH: Path = Path("bench_results.csv")
 PNG_PATH: Path = Path("bench_result.png")
