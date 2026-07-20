@@ -1,6 +1,7 @@
 CC ?= gcc
 BIN_DIR := bin
 SRCS := spinlock_test.c main.c
+HDRS := spinlock.h spinlock_test.h
 
 TARGET_RELEASE := $(BIN_DIR)/spinlock_test
 TARGET_TRACE := $(BIN_DIR)/spinlock_test_trace
@@ -36,11 +37,11 @@ release: $(TARGET_RELEASE)
 
 trace: $(TARGET_TRACE)
 
-$(TARGET_RELEASE): $(SRCS)
+$(TARGET_RELEASE): $(SRCS) $(HDRS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(RELEASE_CFLAGS) $(SRCS) -o $@ $(LDLIBS)
 
-$(TARGET_TRACE): $(SRCS)
+$(TARGET_TRACE): $(SRCS) $(HDRS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(TRACE_CFLAGS) $(SRCS) -o $@ $(TRACE_LDFLAGS) $(LDLIBS)
 
