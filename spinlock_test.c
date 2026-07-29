@@ -263,7 +263,8 @@ static void parse_cpulist(const char *str)
                 }
                 g_conf_cpus = grown;
             }
-            g_conf_cpus[g_conf_ncpus++] = (int)c;
+            g_conf_cpus[g_conf_ncpus] = (int)c;
+            ++g_conf_ncpus;
         }
         if (*p == ',') {
             ++p;
