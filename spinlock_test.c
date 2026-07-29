@@ -170,12 +170,15 @@ static void *task_pthread_spin(void *arg)
 
 static void parse_klist(const char *str)
 {
+    const char *p = str;
+    const char *comma;
+    size_t len;
+
     g_run_ttas = g_run_mcs = g_run_pspin = 0;
 
-    const char *p = str;
     while (*p) {
-        const char *comma = strchr(p, ',');
-        const size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        comma = strchr(p, ',');
+        len = comma ? (size_t)(comma - p) : strlen(p);
         if (len == 4 && strncmp(p, "ttas", 4) == 0) {
             g_run_ttas = 1;
         } else if (len == 3 && strncmp(p, "mcs", 3) == 0) {
@@ -206,13 +209,21 @@ static void parse_klist(const char *str)
  */
 static void parse_cpulist(const char *str)
 {
-    long max_cpu = sysconf(_SC_NPROCESSORS_CONF);
+    const char *p = str;
+    char *endptr;
+    int *grown;
+    long max_cpu;
+    long lo;
+    long hi;
+    long c;
+    int cap = 8;
+
+    max_cpu = sysconf(_SC_NPROCESSORS_CONF);
     if (max_cpu <= 0 || max_cpu > CPU_SETSIZE) {
         /* Clamp to the fixed cpu_set_t width so CPU_SET can never index past it. */
         max_cpu = CPU_SETSIZE;
     }
 
-    int cap = 8;
     g_conf_cpus = malloc(cap * sizeof(*g_conf_cpus));
     if (!g_conf_cpus) {
         perror("malloc");
@@ -220,16 +231,14 @@ static void parse_cpulist(const char *str)
     }
     g_conf_ncpus = 0;
 
-    const char *p = str;
     while (*p) {
-        char *endptr;
         errno = 0;
-        long lo = strtol(p, &endptr, 10);
+        lo = strtol(p, &endptr, 10);
         if (endptr == p || errno != 0) {
             fprintf(stderr, "Error: Invalid CPU list '%s'\n", str);
             exit(EXIT_FAILURE);
         }
-        long hi = lo;
+        hi = lo;
         p = endptr;
         if (*p == '-') {
             errno = 0;
@@ -244,10 +253,10 @@ static void parse_cpulist(const char *str)
             fprintf(stderr, "Error: CPU list '%s' out of range 0-%ld\n", str, max_cpu - 1);
             exit(EXIT_FAILURE);
         }
-        for (long c = lo; c <= hi; ++c) {
+        for (c = lo; c <= hi; ++c) {
             if (g_conf_ncpus == cap) {
                 cap *= 2;
-                int *grown = realloc(g_conf_cpus, cap * sizeof(*g_conf_cpus));
+                grown = realloc(g_conf_cpus, cap * sizeof(*g_conf_cpus));
                 if (!grown) {
                     perror("realloc");
                     exit(EXIT_FAILURE);
@@ -277,11 +286,12 @@ static void parse_cpulist(const char *str)
  */
 static void pin_worker_attr(pthread_attr_t *attr, int i)
 {
+    cpu_set_t set;
+
     if (g_conf_ncpus == 0) {
         return;
     }
 
-    cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(g_conf_cpus[i % g_conf_ncpus], &set);
     pthread_attr_setaffinity_np(attr, sizeof(set), &set);
