@@ -1,17 +1,19 @@
 #define _GNU_SOURCE
+
+#include "spinlock_test.h"
+
+#include <errno.h>
+#include <getopt.h>
+#include <limits.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
-#include <unistd.h>
-#include <getopt.h>
-#include <errno.h>
-#include <limits.h>
 #include <string.h>
-#include <sched.h>
 #include <time.h>
-#include <sys/mman.h>
+#include <unistd.h>
 
-#include "./spinlock_test.h"
+#include <sys/mman.h>
 
 /*
  * Cache-line-isolated wrapper for the POSIX spinlock. pthread_spinlock_t is a
