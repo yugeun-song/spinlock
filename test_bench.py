@@ -22,10 +22,11 @@ WARMUP_RUNS: int = 1
 # state the prior run left behind.
 SETTLE_SEC: float = 0.3
 # Workload = filler NOPs executed while the lock is held, emulating the critical
-# section. At ~0.125 ns/NOP on this class of CPU the powers-of-two range below
-# spans roughly 0-128 ns, densely sampling the regime where spinlocks are
-# actually used: tiny shared-state updates (flag flip ~2 ns, a few struct fields
-# ~4-16 ns) up to a medium CS (~128 ns) where the two locks converge. Anything
+# section. The harness measures the cost of this loop at startup and prints it
+# as "NOP Cost" (about 0.11 ns/NOP on the reference host), so the powers-of-two
+# range below spans roughly 0-115 ns there, densely sampling the regime where
+# spinlocks are actually used: tiny shared-state updates (flag flip ~2 ns, a few
+# struct fields ~4-16 ns) up to a medium CS where the locks converge. Anything
 # heavier is the wrong tool for a spinlock, so it is intentionally not sampled.
 WORKLOAD_RANGE: list[int] = [ 0, 16, 32, 64, 128, 256, 512, 1024 ]
 BENCHMARK_BIN: Path = Path("./bin/spinlock_test")
@@ -33,9 +34,21 @@ CSV_PATH: Path = Path("bench_results.csv")
 PNG_PATH: Path = Path("bench_result.png")
 META_PATH: Path = Path("bench_meta.json")
 
-RE_TTAS = re.compile(r"Custom TTAS Spinlock\s+\]\s+- Elapsed Time :\s+([\d.]+)")
-RE_MCS = re.compile(r"Custom MCS Spinlock\s+\]\s+- Elapsed Time :\s+([\d.]+)")
-RE_PSPIN = re.compile(r"POSIX Spinlock\s+\]\s+- Elapsed Time :\s+([\d.]+)")
+# CSV/plot keys in the harness's -K spelling, with the block title each prints.
+LOCKS: list[str] = ["ttas", "ttas_park", "mcs", "pspin", "pmutex"]
+LOCK_TITLE: dict[str, str] = {
+    "ttas": "Custom TTAS Spinlock",
+    "ttas_park": "Custom TTAS Spin+Park",
+    "mcs": "Custom MCS Spinlock",
+    "pspin": "POSIX Spinlock",
+    "pmutex": "POSIX Mutex",
+}
+RE_ELAPSED: dict[str, re.Pattern] = {
+    lock: re.compile(re.escape(title) + r"\s+\]\s+- Elapsed Time :\s+([\d.]+)")
+    for lock, title in LOCK_TITLE.items()
+}
+RE_NOP_NS = re.compile(r"NOP Cost\s+:\s+([\d.]+) ns")
+RE_SLACK_NS = re.compile(r"Timer Slack\s+:\s+(\d+) ns")
 
 
 def mad(arr: np.ndarray) -> float:
@@ -113,13 +126,12 @@ def pick_iterations(workload: int) -> int:
     return 100_000
 
 
-def run_bench(threads: int, workload: int, pin_cores: list[int], run_mcs: bool
-              ) -> tuple[list[float], list[float], list[float], int]:
+def run_bench(threads: int, workload: int, pin_cores: list[int], run_mcs: bool,
+              env: dict[str, list]) -> tuple[dict[str, list[float]], int]:
     iterations = pick_iterations(workload)
     scale = 1_000_000 / iterations
-    raw_ttas: list[float] = []
-    raw_mcs: list[float] = []
-    raw_pspin: list[float] = []
+    locks = [lock for lock in LOCKS if run_mcs or lock != "mcs"]
+    raw: dict[str, list[float]] = {lock: [] for lock in LOCKS}
 
     for run_idx in range(REPEATS + WARMUP_RUNS):
         # Let the machine settle between launches so one run cannot perturb the
@@ -137,7 +149,7 @@ def run_bench(threads: int, workload: int, pin_cores: list[int], run_mcs: bool
         # Drop the MCS contender once threads oversubscribe the cores: a strict
         # FIFO queue lock convoys there (a preempted successor stalls the whole
         # queue), which would dominate wall-clock and starve the other samples.
-        cmd += ["-K", "ttas,mcs,pspin" if run_mcs else "ttas,pspin"]
+        cmd += ["-K", ",".join(locks)]
         try:
             res = subprocess.run(
                 cmd,
@@ -145,7 +157,7 @@ def run_bench(threads: int, workload: int, pin_cores: list[int], run_mcs: bool
             ).stdout
         except subprocess.TimeoutExpired as e:
             # Should not happen now MCS is skipped when it would convoy; keep any
-            # output flushed before the timeout (TTAS/POSIX run first) as a net.
+            # output flushed before the timeout (MCS runs last) as a net.
             res = e.stdout or ""
             print(f"\nWarning: benchmark timed out (threads={threads}, workload={workload})",
                   file=sys.stderr)
@@ -154,28 +166,30 @@ def run_bench(threads: int, workload: int, pin_cores: list[int], run_mcs: bool
                   file=sys.stderr)
             continue
 
-        t_m = RE_TTAS.search(res)
-        p_m = RE_PSPIN.search(res)
-        if not (t_m and p_m):
+        found = {lock: RE_ELAPSED[lock].search(res) for lock in locks}
+        if not all(found.values()):
             continue
 
         if run_idx < WARMUP_RUNS:
             continue
 
-        raw_ttas.append(float(t_m.group(1)) * scale)
-        raw_pspin.append(float(p_m.group(1)) * scale)
-        m_m = RE_MCS.search(res)
-        if run_mcs and m_m:
-            raw_mcs.append(float(m_m.group(1)) * scale)
+        for lock, m in found.items():
+            raw[lock].append(float(m.group(1)) * scale)
+        for key, rx in (("nop_ns", RE_NOP_NS), ("timer_slack_ns", RE_SLACK_NS)):
+            m = rx.search(res)
+            if m:
+                env.setdefault(key, []).append(float(m.group(1)))
 
-    return raw_ttas, raw_mcs, raw_pspin, iterations
+    return raw, iterations
 
 
 def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list[dict],
                  threads_range: list[int], total_raw_cycles: int, duration: float,
-                 pin_desc: str) -> None:
-    sep = "=" * 132
-    line = "-" * 132
+                 pin_desc: str, env: dict[str, list]) -> None:
+    sep = "=" * 170
+    line = "-" * 170
+    nop_ns = float(np.median(env["nop_ns"])) if env.get("nop_ns") else 0.0
+    slack = int(np.median(env["timer_slack_ns"])) if env.get("timer_slack_ns") else -1
 
     print(f"\n{sep}")
     print("SYSTEM & PERFORMANCE REPORT: HYBRID SPINLOCK BENCHMARK")
@@ -184,6 +198,9 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
     print(f"  - CPU Model       : {cpu_model}")
     print(f"  - CPU Cores       : {num_cpus} Online / {os.cpu_count()} Logical")
     print(f"  - L1 Cache Line   : {l1_cache} bytes")
+    print(f"  - Kernel          : {platform.release()}")
+    print(f"  - NOP Cost        : {nop_ns:.4f} ns (measured by the harness)")
+    print(f"  - Timer Slack     : {slack} ns")
     print(line)
     print(f"TEST PARAMETERS:")
     print(f"  - Aggregation     : Median ± MAD of {REPEATS} runs (+ {WARMUP_RUNS} warmup discarded)")
@@ -192,26 +209,24 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
     print(f"  - Pinning         : {pin_desc}")
     print(f"  - Bench Duration  : {duration:.2f} seconds")
     print(sep)
-    print(f"{'Workload (NOPs)':<16} | {'Threads':<8} | {'Iters':<9} | "
-          f"{'TTAS (ms)':<18} | {'MCS (ms)':<18} | {'PSpin (ms)':<18} | {'TTAS/PSpin':<10}")
+    print(f"{'Workload (NOPs)':<16} | {'CS (ns)':<8} | {'Threads':<8} | {'Iters':<9} | "
+          f"{'TTAS (ms)':<18} | {'TTAS park (ms)':<18} | {'MCS (ms)':<18} | "
+          f"{'PSpin (ms)':<18} | {'PMutex (ms)':<18} | {'TTAS/PSpin':<10}")
     print(line)
 
     for d in report_data:
-        ttas_str = f"{d['spin_med']:.3f} ±{d['spin_mad']:.1f}"
-        mcs_str = (f"{d['mcs_med']:.3f} ±{d['mcs_mad']:.1f}"
-                   if d['mcs_med'] is not None else "— (skipped)")
-        pspin_str = f"{d['pspin_med']:.3f} ±{d['pspin_mad']:.1f}"
-        print(f"{d['workload']:<16} | {d['t']:<8} | {d['iters']:<9} | "
-              f"{ttas_str:<18} | {mcs_str:<18} | {pspin_str:<18} | {d['ratio']:.2f}x")
+        cells = []
+        for lock in LOCKS:
+            med, mad_v = d["med"][lock], d["mad"][lock]
+            cells.append(f"{med:.3f} ±{mad_v:.1f}" if med is not None else "— (skipped)")
+        print(f"{d['workload']:<16} | {d['workload'] * nop_ns:<8.1f} | {d['t']:<8} | {d['iters']:<9} | "
+              + " | ".join(f"{c:<18}" for c in cells) + f" | {d['ratio']:.2f}x")
         if d['t'] == threads_range[-1]:
             print(line)
 
 
-def write_csv(path: Path, results_ttas_raw: list[list[list[float]]],
-              results_mcs_raw: list[list[list[float]]],
-              results_pspin_raw: list[list[list[float]]],
-              results_iters: list[list[int]],
-              threads_range: list[int]) -> None:
+def write_csv(path: Path, results_raw: list[list[dict[str, list[float]]]],
+              results_iters: list[list[int]], threads_range: list[int]) -> None:
     with path.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["workload_nops", "threads", "lock", "iterations",
@@ -219,23 +234,23 @@ def write_csv(path: Path, results_ttas_raw: list[list[list[float]]],
         for i, wl in enumerate(WORKLOAD_RANGE):
             for j, t in enumerate(threads_range):
                 iters = results_iters[i][j]
-                for k, v in enumerate(results_ttas_raw[i][j]):
-                    w.writerow([wl, t, "ttas", iters, k, f"{v:.6f}"])
-                for k, v in enumerate(results_mcs_raw[i][j]):
-                    w.writerow([wl, t, "mcs", iters, k, f"{v:.6f}"])
-                for k, v in enumerate(results_pspin_raw[i][j]):
-                    w.writerow([wl, t, "pspin", iters, k, f"{v:.6f}"])
+                for lock in LOCKS:
+                    for k, v in enumerate(results_raw[i][j][lock]):
+                        w.writerow([wl, t, lock, iters, k, f"{v:.6f}"])
 
 
 def write_meta(path: Path, cpu_model: str, pin_cores: list[int],
-               threads_range: list[int], num_cpus: int) -> None:
+               threads_range: list[int], num_cpus: int, env: dict[str, list]) -> None:
     """Sidecar so the plot can disclose the run context (pinned core budget, CPU
-    label) without re-deriving it from the CSV."""
+    label, measured NOP cost) without re-deriving it from the CSV."""
     meta = {
         "cpu_model": cpu_model,
         "cores_pinned": len(pin_cores) if pin_cores else num_cpus,
         "pin_desc": pin_desc_str(pin_cores),
         "threads_range": threads_range,
+        "kernel": platform.release(),
+        "nop_ns": float(np.median(env["nop_ns"])) if env.get("nop_ns") else None,
+        "timer_slack_ns": int(np.median(env["timer_slack_ns"])) if env.get("timer_slack_ns") else None,
     }
     path.write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -255,8 +270,8 @@ def render_dashboard(cpu_model: str | None) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Benchmark the custom spinlocks vs pthread_spin_lock; writes "
-                    "the CSV/meta and renders the dashboard via plot.py.")
+        description="Benchmark the custom spinlocks vs the POSIX spinlock and mutex; "
+                    "writes the CSV/meta and renders the dashboard via plot.py.")
     parser.add_argument(
         "--plot-only", action="store_true",
         help=f"Skip benchmarking and redraw {PNG_PATH} from an existing "
@@ -303,10 +318,9 @@ def main() -> None:
     n_wl = len(WORKLOAD_RANGE)
     n_th = len(threads_range)
 
-    results_ttas_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
-    results_mcs_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
-    results_pspin_raw: list[list[list[float]]] = [[[] for _ in range(n_th)] for _ in range(n_wl)]
+    results_raw: list[list[dict[str, list[float]]]] = [[{} for _ in range(n_th)] for _ in range(n_wl)]
     results_iters: list[list[int]] = [[0] * n_th for _ in range(n_wl)]
+    env: dict[str, list] = {}
 
     total_steps = n_wl * n_th
     current_step = 0
@@ -317,29 +331,20 @@ def main() -> None:
 
     for i, wl in enumerate(WORKLOAD_RANGE):
         for j, t in enumerate(threads_range):
-            raw_ttas, raw_mcs, raw_pspin, iters = run_bench(t, wl, pin_cores, t <= core_budget)
-            results_ttas_raw[i][j] = raw_ttas
-            results_mcs_raw[i][j] = raw_mcs
-            results_pspin_raw[i][j] = raw_pspin
+            raw, iters = run_bench(t, wl, pin_cores, t <= core_budget, env)
+            results_raw[i][j] = raw
             results_iters[i][j] = iters
 
-            ttas_arr = np.asarray(raw_ttas) if raw_ttas else np.zeros(1)
-            pspin_arr = np.asarray(raw_pspin) if raw_pspin else np.zeros(1)
-            ttas_med = float(np.median(ttas_arr))
-            pspin_med = float(np.median(pspin_arr))
-            ttas_mad_v = mad(ttas_arr) if raw_ttas else 0.0
-            pspin_mad_v = mad(pspin_arr) if raw_pspin else 0.0
-            # None when MCS was skipped at this point (oversubscription), so the
-            # report shows it as skipped rather than a misleading 0.000 ms.
-            mcs_med = float(np.median(np.asarray(raw_mcs))) if raw_mcs else None
-            mcs_mad_v = mad(np.asarray(raw_mcs)) if raw_mcs else None
-            ratio = pspin_med / ttas_med if ttas_med > 0 else 0.0
+            # None when a lock was skipped at this point (MCS under
+            # oversubscription), so the report shows it as skipped rather than a
+            # misleading 0.000 ms.
+            med = {lock: (float(np.median(np.asarray(v))) if v else None) for lock, v in raw.items()}
+            mad_v = {lock: (mad(np.asarray(v)) if v else None) for lock, v in raw.items()}
+            ratio = (med["pspin"] / med["ttas"]) if med["ttas"] and med["pspin"] else 0.0
 
             total_raw_cycles += iters * REPEATS * t
             report_data.append({
-                "workload": wl, "t": t,
-                "spin_med": ttas_med, "mcs_med": mcs_med, "pspin_med": pspin_med,
-                "spin_mad": ttas_mad_v, "mcs_mad": mcs_mad_v, "pspin_mad": pspin_mad_v,
+                "workload": wl, "t": t, "med": med, "mad": mad_v,
                 "ratio": ratio, "iters": iters,
             })
 
@@ -353,12 +358,11 @@ def main() -> None:
 
     duration = time.time() - start_time
     print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
-                 total_raw_cycles, duration, pin_desc)
+                 total_raw_cycles, duration, pin_desc, env)
     # Write the CSV/meta first, then render from them, so the committed data is
     # the single source of truth and the PNG always matches the tracked CSV.
-    write_csv(CSV_PATH, results_ttas_raw, results_mcs_raw, results_pspin_raw,
-              results_iters, threads_range)
-    write_meta(META_PATH, cpu_model, pin_cores, threads_range, num_cpus)
+    write_csv(CSV_PATH, results_raw, results_iters, threads_range)
+    write_meta(META_PATH, cpu_model, pin_cores, threads_range, num_cpus, env)
     render_dashboard(cpu_model)
 
     print(f"[Done] Saved {PNG_PATH}, {CSV_PATH}, and {META_PATH}")

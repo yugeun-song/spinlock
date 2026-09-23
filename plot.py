@@ -53,12 +53,16 @@ INK_FAINT = "#707a8a"   # muted         — tertiary text
 CAUTION = "#fcd535"     # primary (Binance yellow) — the oversubscribed regime
 ACCENT = "#2dbdb6"      # accent-turquoise — sparing KPI accent
 
-# One colour per lock, from the trading-semantics tokens (up / down / info).
-# Reinforced with a distinct marker each so identity is never colour-alone.
-LOCKS = ["mcs", "ttas", "pspin"]  # legend/draw order: red → green → blue
-COLOR = {"ttas": "#0ecb81", "mcs": "#f6465d", "pspin": "#3b82f6"}
-MARKER = {"ttas": "o", "mcs": "s", "pspin": "^"}
-NAME = {"ttas": "Custom TTAS", "mcs": "Custom MCS", "pspin": "POSIX Spinlock"}
+# One colour per lock, from the trading-semantics tokens (up / down / info),
+# plus amber for the parking TTAS and cyan for the mutex baseline (validated
+# as distinguishable from the three originals on the dark panel). Reinforced
+# with a distinct marker each so identity is never colour-alone.
+LOCKS = ["mcs", "ttas", "ttas_park", "pspin", "pmutex"]  # legend/draw order
+COLOR = {"ttas": "#0ecb81", "mcs": "#f6465d", "pspin": "#3b82f6",
+         "ttas_park": "#e0a800", "pmutex": "#22d3ee"}
+MARKER = {"ttas": "o", "mcs": "s", "pspin": "^", "ttas_park": "D", "pmutex": "v"}
+NAME = {"ttas": "Custom TTAS", "mcs": "Custom MCS", "pspin": "POSIX Spinlock",
+        "ttas_park": "Custom TTAS Spin+Park", "pmutex": "POSIX Mutex"}
 
 # Diverging map for the speedup heatmaps: trading-down red (TTAS slower) ↔ neutral
 # panel ↔ trading-up green (TTAS faster), so speedup reads with the up/down
@@ -162,7 +166,8 @@ def draw_stat_tile(ax, value, unit, label, color):
             fontsize=10, color=INK_MUTED)
 
 
-def draw_scaling_panel(ax, raw, wl, threads, ylim, cores, rng, legend=False):
+def draw_scaling_panel(ax, raw, wl, threads, ylim, cores, rng, legend=False,
+                       nop_ns=None):
     _panel_frame(ax)
     xpos = list(range(len(threads)))
 
@@ -204,8 +209,8 @@ def draw_scaling_panel(ax, raw, wl, threads, ylim, cores, rng, legend=False):
     ax.set_xticks(xpos)
     ax.set_xticklabels([str(t) for t in threads])
     ax.set_xlim(-0.5, len(threads) - 0.4)
-    ax.set_title(f"CS = {wl} NOPs", loc="left", fontsize=10.5, fontweight="bold",
-                 color=INK, pad=6)
+    cs = f"CS = {wl} NOPs" + (f"  (≈ {wl * nop_ns:.0f} ns)" if nop_ns else "")
+    ax.set_title(cs, loc="left", fontsize=10.5, fontweight="bold", color=INK, pad=6)
     ax.grid(True, axis="y", which="major", ls="-", lw=0.6, alpha=0.5)
     ax.grid(False, axis="x")
     ax.set_axisbelow(True)
@@ -321,6 +326,7 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
     cpu = cpu_model or meta.get("cpu_model", "unknown CPU")
     cores = int(meta.get("cores_pinned") or (max(threads) // 2 if threads else 1))
     pin_desc = meta.get("pin_desc", f"{cores} cores")
+    nop_ns = meta.get("nop_ns")
     rng = np.random.default_rng(20240716)
 
     # Shared y-limits across all scaling panels (honest cross-panel comparison).
@@ -352,8 +358,8 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
     # --- Row 0: KPI stat tiles ------------------------------------------------
     tile_gs = gs[0, :].subgridspec(1, 5, wspace=0.14)
     tiles = [
-        (f"{peak_p:.1f}", "x", "TTAS peak win vs POSIX", COLOR["ttas"]),
-        (f"{peak_m:.1f}", "x", "TTAS peak win vs MCS", COLOR["ttas"]),
+        (f"{peak_p:.1f}", "x", "POSIX/TTAS elapsed ratio, peak", COLOR["ttas"]),
+        (f"{peak_m:.1f}", "x", "MCS/TTAS elapsed ratio, peak", COLOR["ttas"]),
         (f"{breakeven}" if breakeven is not None else ">1024", "NOPs",
          "Break-even critical section", ACCENT),
         (f"{base_ns:.1f}", "ns", "TTAS cost, 1 thread", INK),
@@ -366,7 +372,7 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
     for i, wl in enumerate(workloads):
         ax = fig.add_subplot(gs[1 + i // ncol, i % ncol])
         draw_scaling_panel(ax, raw, wl, threads, ylim, cores, rng,
-                           legend=(i == 0))
+                           legend=(i == 0), nop_ns=nop_ns)
         if i % ncol == 0:
             ax.set_ylabel("ns / lock-unlock  (log)", color=INK_MUTED)
         if i // ncol == nrow_panels - 1:
@@ -377,18 +383,18 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
     axh2 = fig.add_subplot(gs[1 + nrow_panels, 1])
     hm_norm, hm_vmax = heatmap_norm(mp, mm)  # one norm → one honest shared colorbar
     im = draw_heatmap(axh1, mp, sp, workloads, threads,
-                      "TTAS speedup over POSIX   (>1 = TTAS faster)", hm_norm, hm_vmax)
+                      "POSIX/TTAS elapsed-time ratio   (>1 = TTAS finished sooner)", hm_norm, hm_vmax)
     draw_heatmap(axh2, mm, sm, workloads, threads,
-                 "TTAS speedup over MCS   (>1 = TTAS faster)", hm_norm, hm_vmax)
+                 "MCS/TTAS elapsed-time ratio   (>1 = TTAS finished sooner)", hm_norm, hm_vmax)
     cb = fig.colorbar(im, ax=[axh1, axh2], fraction=0.03, pad=0.02)
-    cb.set_label("log2(speedup) · 0 = break-even · grey = within run-to-run noise",
+    cb.set_label("log2(elapsed ratio) · 0 = break-even · grey = within run-to-run noise",
                  color=INK_MUTED, fontsize=8.5)
     cb.ax.yaxis.set_tick_params(color=INK_MUTED)
     plt.setp(cb.ax.get_yticklabels(), color=INK_MUTED)
     cb.outline.set_edgecolor(PANEL_EDGE)
 
-    fig.suptitle(f"Custom TTAS vs Custom MCS vs POSIX Spinlock   —   {cpu}",
-                 fontsize=19, fontweight="bold", color=INK, x=0.06, ha="left",
+    fig.suptitle(f"Custom TTAS / TTAS Spin+Park / MCS vs POSIX Spinlock / Mutex   —   {cpu}",
+                 fontsize=17, fontweight="bold", color=INK, x=0.06, ha="left",
                  y=0.983)
     fig.text(0.06, 0.953,
              "lock/unlock latency amortised across all threads · dots = 7 runs, "
@@ -396,7 +402,7 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
              ha="left", fontsize=12, color=INK_MUTED)
     fig.text(0.06, 0.016,
              f"Pinning: {pin_desc}.  Critical section = N filler NOPs held under "
-             "the lock.  Speedup = ratio of medians; cells within a bootstrap 95% "
+             "the lock.  Ratio = ratio of elapsed-time medians; cells within a bootstrap 95% "
              "CI of break-even are greyed.  MCS is skipped where it convoys under "
              "oversubscription.",
              ha="left", fontsize=8, color=INK_FAINT, style="italic")

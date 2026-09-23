@@ -1,6 +1,14 @@
 {
-  "cpu_model": "Intel Core Ultra 5 226V",
+  "cpu_model": "Intel(R) Core(TM) Ultra 5 226V",
   "cores_pinned": 4,
-  "pin_desc": "4 P-cores",
-  "threads_range": [1, 2, 4, 8]
+  "pin_desc": "cpus 0,1,2,3",
+  "threads_range": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "kernel": "7.2.6-arch2-1",
+  "nop_ns": 0.1115,
+  "timer_slack_ns": 50000
 }
