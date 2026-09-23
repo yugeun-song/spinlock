@@ -21,7 +21,7 @@ endif
 
 WARN_FLAGS := -Wall -Wextra
 COMMON_CFLAGS := -std=gnu99 $(WARN_FLAGS) $(ARCH_CFLAGS) -fno-omit-frame-pointer -fasynchronous-unwind-tables
-LDLIBS := -pthread -lrt
+LDLIBS := -pthread
 
 RELEASE_CFLAGS := -O3 $(COMMON_CFLAGS)
 TRACE_CFLAGS := -O0 -g3 $(COMMON_CFLAGS) \

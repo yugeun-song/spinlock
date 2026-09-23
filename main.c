@@ -12,6 +12,7 @@ int main(int argc, char *argv[])
     bench_detect_topology();
     bench_parse_args(argc, argv);
     bench_lock_memory();
+    bench_calibrate();
     bench_print_config();
 
     bench_warmup_all();

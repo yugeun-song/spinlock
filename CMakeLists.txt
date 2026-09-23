@@ -50,9 +50,9 @@ find_package(Threads REQUIRED)
 
 add_executable(spinlock_test ${SRCS})
 target_compile_options(spinlock_test PRIVATE ${COMMON_OPTS} -O3)
-target_link_libraries(spinlock_test PRIVATE Threads::Threads rt)
+target_link_libraries(spinlock_test PRIVATE Threads::Threads)
 
 add_executable(spinlock_test_trace ${SRCS})
 target_compile_options(spinlock_test_trace PRIVATE ${COMMON_OPTS} ${TRACE_OPTS})
 target_link_options(spinlock_test_trace PRIVATE -rdynamic)
-target_link_libraries(spinlock_test_trace PRIVATE Threads::Threads rt)
+target_link_libraries(spinlock_test_trace PRIVATE Threads::Threads)

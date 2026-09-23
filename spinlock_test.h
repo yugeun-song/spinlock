@@ -19,6 +19,8 @@
 #define MAX_LOAD INT_MAX
 #define MIN_BACKOFF 1
 #define MAX_BACKOFF (INT_MAX / 2)
+#define NOP_CALIB_LOOPS 1000000
+#define NOP_CALIB_PASSES 8
 
 /*
  * Quiescent gap inserted right before each measured benchmark so the system
@@ -27,10 +29,17 @@
  */
 #define SETTLE_DELAY_MS 100
 
+enum bench_lock {
+    BENCH_TTAS,
+    BENCH_TTAS_PARK,
+    BENCH_PSPIN,
+    BENCH_PMUTEX,
+    BENCH_MCS,
+    BENCH_LOCK_COUNT
+};
+
 struct bench_results {
-    double ttas_ms;
-    double mcs_ms;
-    double pspin_ms;
+    double ms[BENCH_LOCK_COUNT];
 };
 
 void bench_detect_topology(void);
@@ -38,6 +47,8 @@ void bench_detect_topology(void);
 void bench_parse_args(int argc, char *argv[]);
 
 void bench_lock_memory(void);
+
+void bench_calibrate(void);
 
 void bench_print_config(void);
 

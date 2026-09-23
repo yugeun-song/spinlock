@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <sys/mman.h>
+#include <sys/prctl.h>
 
 /*
  * Cache-line-isolated wrapper for the POSIX spinlock. pthread_spinlock_t is a
@@ -30,12 +31,33 @@ typedef struct {
     char cache_line_padding[CACHE_LINE_SIZE - sizeof(pthread_spinlock_t)];
 } __attribute__((aligned(CACHE_LINE_SIZE))) isolated_pspin_t;
 
+typedef struct {
+    pthread_mutex_t lock;
+    char cache_line_padding[CACHE_LINE_SIZE - sizeof(pthread_mutex_t)];
+} __attribute__((aligned(CACHE_LINE_SIZE))) isolated_pmutex_t;
+
 struct thread_ctx {
     long long *shared_counter;
     spinlock_ttas_t *spinlock_ttas;
     spinlock_mcs_t *spinlock_mcs;
     pthread_spinlock_t *pthread_spin;
+    pthread_mutex_t *pthread_mutex;
     pthread_barrier_t *barrier;
+    struct timespec begin;
+    struct timespec done;
+};
+
+struct contender {
+    const char *key;
+    const char *name;
+    const char *label;
+    void *(*task)(void *);
+    int run;
+};
+
+struct nop_calib {
+    int loops;
+    double ns;
 };
 
 int g_conf_spin_min = DEFAULT_SPIN_MIN;
@@ -44,8 +66,10 @@ int g_conf_spin_max = DEFAULT_SPIN_MAX;
 static int g_conf_iterations = DEFAULT_ITERATIONS;
 static int g_conf_load_loops = DEFAULT_LOAD_LOOPS;
 static int g_conf_nthreads = DEFAULT_NTHREADS;
+static int g_conf_timerslack_ns = -1;
 
 static long g_sys_cache_line_size = 0;
+static double g_nop_ns = 0.0;
 static const char *g_mlock_status = "unavailable";
 
 /*
@@ -58,16 +82,6 @@ static const char *g_mlock_status = "unavailable";
 static int *g_conf_cpus = NULL;
 static int g_conf_ncpus = 0;
 
-/*
- * Which contenders to run (-K). Defaults to all three. The knob exists mainly
- * so a sweep can drop the MCS lock at thread counts that oversubscribe the
- * cores: a strict FIFO queue lock convoys there (a preempted successor stalls
- * the whole queue) and would otherwise dominate wall-clock with timeouts.
- */
-static int g_run_ttas = 1;
-static int g_run_mcs = 1;
-static int g_run_pspin = 1;
-
 static double calc_time_diff_ms(const struct timespec *start, const struct timespec *end)
 {
     if (!start || !end) {
@@ -79,6 +93,13 @@ static double calc_time_diff_ms(const struct timespec *start, const struct times
     const long long elapsed_ns = sec_diff * 1000000000LL + nsec_diff;
 
     return (double)elapsed_ns / 1000000.0;
+}
+
+static inline void workload(int loops)
+{
+    for (int j = 0; j < loops; ++j) {
+        asm volatile("nop" : : : "memory");
+    }
 }
 
 static void *task_spinlock_ttas(void *arg)
@@ -95,18 +116,43 @@ static void *task_spinlock_ttas(void *arg)
     spinlock_ttas_t *const lock = ctx->spinlock_ttas;
 
     pthread_barrier_wait(ctx->barrier);
+    clock_gettime(CLOCK_MONOTONIC, &ctx->begin);
 
     for (int i = 0; i < iters; ++i) {
         spin_lock_ttas(lock);
         *counter += 1;
-
-        for (int j = 0; j < loops; ++j) {
-            asm volatile("nop" : : : "memory");
-        }
-
+        workload(loops);
         spin_unlock_ttas(lock);
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &ctx->done);
+    return NULL;
+}
+
+static void *task_spinlock_ttas_park(void *arg)
+{
+    struct thread_ctx *ctx = (struct thread_ctx *)arg;
+
+    if (!ctx) {
+        return NULL;
+    }
+
+    const int iters = g_conf_iterations;
+    const int loops = g_conf_load_loops;
+    long long *const counter = ctx->shared_counter;
+    spinlock_ttas_t *const lock = ctx->spinlock_ttas;
+
+    pthread_barrier_wait(ctx->barrier);
+    clock_gettime(CLOCK_MONOTONIC, &ctx->begin);
+
+    for (int i = 0; i < iters; ++i) {
+        spin_lock_ttas_park(lock);
+        *counter += 1;
+        workload(loops);
+        spin_unlock_ttas(lock);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &ctx->done);
     return NULL;
 }
 
@@ -124,18 +170,16 @@ static void *task_spinlock_mcs(void *arg)
     spinlock_mcs_t *const lock = ctx->spinlock_mcs;
 
     pthread_barrier_wait(ctx->barrier);
+    clock_gettime(CLOCK_MONOTONIC, &ctx->begin);
 
     for (int i = 0; i < iters; ++i) {
         spin_lock_mcs(lock);
         *counter += 1;
-
-        for (int j = 0; j < loops; ++j) {
-            asm volatile("nop" : : : "memory");
-        }
-
+        workload(loops);
         spin_unlock_mcs(lock);
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &ctx->done);
     return NULL;
 }
 
@@ -153,41 +197,106 @@ static void *task_pthread_spin(void *arg)
     pthread_spinlock_t *const lock = ctx->pthread_spin;
 
     pthread_barrier_wait(ctx->barrier);
+    clock_gettime(CLOCK_MONOTONIC, &ctx->begin);
 
     for (int i = 0; i < iters; ++i) {
         pthread_spin_lock(lock);
         *counter += 1;
-
-        for (int j = 0; j < loops; ++j) {
-            asm volatile("nop" : : : "memory");
-        }
-
+        workload(loops);
         pthread_spin_unlock(lock);
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &ctx->done);
     return NULL;
 }
+
+static void *task_pthread_mutex(void *arg)
+{
+    struct thread_ctx *ctx = (struct thread_ctx *)arg;
+
+    if (!ctx) {
+        return NULL;
+    }
+
+    const int iters = g_conf_iterations;
+    const int loops = g_conf_load_loops;
+    long long *const counter = ctx->shared_counter;
+    pthread_mutex_t *const lock = ctx->pthread_mutex;
+
+    pthread_barrier_wait(ctx->barrier);
+    clock_gettime(CLOCK_MONOTONIC, &ctx->begin);
+
+    for (int i = 0; i < iters; ++i) {
+        pthread_mutex_lock(lock);
+        *counter += 1;
+        workload(loops);
+        pthread_mutex_unlock(lock);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &ctx->done);
+    return NULL;
+}
+
+static void *task_calibrate_nop(void *arg)
+{
+    struct nop_calib *calib = (struct nop_calib *)arg;
+    struct timespec t0, t1;
+    double best_ms = 1e300;
+
+    for (int pass = 0; pass < NOP_CALIB_PASSES; ++pass) {
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        workload(calib->loops);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        const double ms = calc_time_diff_ms(&t0, &t1);
+        if (ms < best_ms) {
+            best_ms = ms;
+        }
+    }
+
+    calib->ns = best_ms * 1e6 / calib->loops;
+    return NULL;
+}
+
+/*
+ * Which contenders to run (-K). Defaults to all five, measured in table order
+ * with MCS last: a strict FIFO queue lock convoys when threads oversubscribe
+ * the cores (a preempted successor stalls the whole queue), so its slow run
+ * cannot delay the others' already-flushed output.
+ */
+#define KLIST_KEYS "ttas,ttas_park,pspin,pmutex,mcs"
+
+static struct contender g_locks[BENCH_LOCK_COUNT] = {
+    [BENCH_TTAS] = {"ttas", "Custom TTAS Spinlock", "Custom TTAS", task_spinlock_ttas, 1},
+    [BENCH_TTAS_PARK] = {"ttas_park", "Custom TTAS Spin+Park", "TTAS Spin+Park", task_spinlock_ttas_park, 1},
+    [BENCH_PSPIN] = {"pspin", "POSIX Spinlock", "POSIX Spinlock", task_pthread_spin, 1},
+    [BENCH_PMUTEX] = {"pmutex", "POSIX Mutex", "POSIX Mutex", task_pthread_mutex, 1},
+    [BENCH_MCS] = {"mcs", "Custom MCS Spinlock", "Custom MCS", task_spinlock_mcs, 1},
+};
 
 static void parse_klist(const char *str)
 {
     const char *p = str;
     const char *comma;
     size_t len;
+    int any = 0;
+    int k;
 
-    g_run_ttas = g_run_mcs = g_run_pspin = 0;
+    for (k = 0; k < BENCH_LOCK_COUNT; ++k) {
+        g_locks[k].run = 0;
+    }
 
     while (*p) {
         comma = strchr(p, ',');
         len = comma ? (size_t)(comma - p) : strlen(p);
-        if (len == 4 && strncmp(p, "ttas", 4) == 0) {
-            g_run_ttas = 1;
-        } else if (len == 3 && strncmp(p, "mcs", 3) == 0) {
-            g_run_mcs = 1;
-        } else if (len == 5 && strncmp(p, "pspin", 5) == 0) {
-            g_run_pspin = 1;
-        } else {
-            fprintf(stderr, "Error: Unknown lock in -K: '%.*s' (use ttas,mcs,pspin)\n",
-                    (int)len, p);
+        for (k = 0; k < BENCH_LOCK_COUNT; ++k) {
+            if (len == strlen(g_locks[k].key) && strncmp(p, g_locks[k].key, len) == 0) {
+                g_locks[k].run = 1;
+                any = 1;
+                break;
+            }
+        }
+        if (k == BENCH_LOCK_COUNT) {
+            fprintf(stderr, "Error: Unknown lock in -K: '%.*s' (use " KLIST_KEYS ")\n", (int)len, p);
             exit(EXIT_FAILURE);
         }
         if (!comma) {
@@ -196,7 +305,7 @@ static void parse_klist(const char *str)
         p = comma + 1;
     }
 
-    if (!g_run_ttas && !g_run_mcs && !g_run_pspin) {
+    if (!any) {
         fprintf(stderr, "Error: -K selected no locks\n");
         exit(EXIT_FAILURE);
     }
@@ -312,7 +421,9 @@ static inline void print_help(const char *prog_name)
             "                  (deterministic placement; pass >= as many cores as threads\n"
             "                  from one homogeneous class to control P/E-core variance)\n"
             "  -K <locks>      Which contenders to run, comma-separated subset of\n"
-            "                  ttas,mcs,pspin (default: all three)\n"
+            "                  " KLIST_KEYS " (default: all five)\n"
+            "  -S <ns>         Timer slack via prctl(PR_SET_TIMERSLACK); it stretches every\n"
+            "                  nanosleep of ttas_park (0 restores the kernel default)\n"
             "  -h              Show this help and exit\n",
             prog_name, MIN_THREADS, MAX_THREADS, DEFAULT_NTHREADS, MIN_ITERS, MAX_ITERS,
             DEFAULT_ITERATIONS, MIN_LOAD, MAX_LOAD, DEFAULT_LOAD_LOOPS, MIN_BACKOFF, MAX_BACKOFF,
@@ -357,14 +468,19 @@ static void settle_between_tests(void)
 static double run_benchmark(const char *name, void *(*task_routine)(void *))
 {
     isolated_pspin_t local_pspin;
+    isolated_pmutex_t local_pmutex = {.lock = PTHREAD_MUTEX_INITIALIZER};
     spinlock_ttas_t local_spinlock;
     spinlock_mcs_t local_mcs;
     pthread_barrier_t barrier;
     struct thread_ctx ctx;
     struct timespec start, end;
     long long local_counter = 0;
+    double min_ms = 1e300;
+    double max_ms = 0.0;
 
-    settle_between_tests();
+    if (name) {
+        settle_between_tests();
+    }
 
     spin_init_ttas(&local_spinlock);
     spin_init_mcs(&local_mcs);
@@ -382,10 +498,12 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
     ctx.spinlock_ttas = &local_spinlock;
     ctx.spinlock_mcs = &local_mcs;
     ctx.pthread_spin = &local_pspin.lock;
+    ctx.pthread_mutex = &local_pmutex.lock;
     ctx.barrier = &barrier;
 
     pthread_t *threads = calloc(g_conf_nthreads, sizeof(*threads));
-    if (!threads) {
+    struct thread_ctx *ctxs = calloc(g_conf_nthreads, sizeof(*ctxs));
+    if (!threads || !ctxs) {
         perror("calloc");
         pthread_barrier_destroy(&barrier);
         pthread_spin_destroy(&local_pspin.lock);
@@ -394,13 +512,15 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
 
     for (int i = 0; i < g_conf_nthreads; ++i) {
         pthread_attr_t attr;
+        ctxs[i] = ctx;
         pthread_attr_init(&attr);
         pin_worker_attr(&attr, i);
-        const int ret = pthread_create(&threads[i], &attr, task_routine, &ctx);
+        const int ret = pthread_create(&threads[i], &attr, task_routine, &ctxs[i]);
         pthread_attr_destroy(&attr);
         if (ret != 0) {
             fprintf(stderr, "Error: pthread_create failed at index %d: %s\n", i, strerror(ret));
             free(threads);
+            free(ctxs);
             exit(EXIT_FAILURE);
         }
     }
@@ -416,15 +536,32 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
     const double elapsed_ms = calc_time_diff_ms(&start, &end);
     const long long expected = (long long)g_conf_iterations * g_conf_nthreads;
 
-    const char *status = (local_counter == expected) ? "OK" : "FAIL";
-    printf("[ %-22s ]\n"
-           "  - Elapsed Time : %10.3f ms\n"
-           "  - Atomic Count : %10lld / %lld (%s)\n",
-           name, elapsed_ms, local_counter, expected, status);
+    struct timespec origin = ctxs[0].begin;
+    for (int i = 1; i < g_conf_nthreads; ++i) {
+        if (calc_time_diff_ms(&origin, &ctxs[i].begin) < 0.0) {
+            origin = ctxs[i].begin;
+        }
+    }
+    for (int i = 0; i < g_conf_nthreads; ++i) {
+        const double ms = calc_time_diff_ms(&origin, &ctxs[i].done);
+        min_ms = (ms < min_ms) ? ms : min_ms;
+        max_ms = (ms > max_ms) ? ms : max_ms;
+    }
+
+    if (name) {
+        const char *status = (local_counter == expected) ? "OK" : "FAIL";
+        printf("[ %-22s ]\n"
+               "  - Elapsed Time : %10.3f ms\n"
+               "  - Atomic Count : %10lld / %lld (%s)\n"
+               "  - Fairness     : min %10.3f ms, max %10.3f ms, min/max %.2f\n",
+               name, elapsed_ms, local_counter, expected, status, min_ms, max_ms,
+               (max_ms > 0.0) ? min_ms / max_ms : 1.0);
+    }
 
     pthread_barrier_destroy(&barrier);
     pthread_spin_destroy(&local_pspin.lock);
     free(threads);
+    free(ctxs);
 
     return elapsed_ms;
 }
@@ -438,71 +575,11 @@ static double run_benchmark(const char *name, void *(*task_routine)(void *))
  */
 static void run_warmup(void *(*task_routine)(void *))
 {
-    isolated_pspin_t local_pspin;
-    spinlock_ttas_t local_spinlock;
-    spinlock_mcs_t local_mcs;
-    pthread_barrier_t barrier;
-    struct thread_ctx ctx;
-    long long local_counter = 0;
     const int saved_iters = g_conf_iterations;
-
     const int warmup_iters = saved_iters / 10;
+
     g_conf_iterations = (warmup_iters > 0) ? warmup_iters : 1;
-
-    spin_init_ttas(&local_spinlock);
-    spin_init_mcs(&local_mcs);
-    if (pthread_spin_init(&local_pspin.lock, PTHREAD_PROCESS_PRIVATE) != 0) {
-        g_conf_iterations = saved_iters;
-        return;
-    }
-    if (pthread_barrier_init(&barrier, NULL, g_conf_nthreads + 1) != 0) {
-        g_conf_iterations = saved_iters;
-        pthread_spin_destroy(&local_pspin.lock);
-        return;
-    }
-
-    ctx.shared_counter = &local_counter;
-    ctx.spinlock_ttas = &local_spinlock;
-    ctx.spinlock_mcs = &local_mcs;
-    ctx.pthread_spin = &local_pspin.lock;
-    ctx.barrier = &barrier;
-
-    pthread_t *threads = calloc(g_conf_nthreads, sizeof(*threads));
-    if (!threads) {
-        g_conf_iterations = saved_iters;
-        pthread_barrier_destroy(&barrier);
-        pthread_spin_destroy(&local_pspin.lock);
-        return;
-    }
-
-    for (int i = 0; i < g_conf_nthreads; ++i) {
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pin_worker_attr(&attr, i);
-        const int rc = pthread_create(&threads[i], &attr, task_routine, &ctx);
-        pthread_attr_destroy(&attr);
-        if (rc != 0) {
-            /*
-             * Workers 0..i-1 are already parked on the barrier, which needs
-             * nthreads+1 participants. Destroying it here would be UB and would
-             * orphan those threads on this soon-to-be-dead stack frame, so bail
-             * the whole process as run_benchmark does on the same failure.
-             */
-            fprintf(stderr, "Error: warmup pthread_create failed at index %d: %s\n",
-                    i, strerror(rc));
-            free(threads);
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    pthread_barrier_wait(&barrier);
-    for (int i = 0; i < g_conf_nthreads; ++i) {
-        pthread_join(threads[i], NULL);
-    }
-
-    pthread_barrier_destroy(&barrier);
-    pthread_spin_destroy(&local_pspin.lock);
-    free(threads);
+    run_benchmark(NULL, task_routine);
     g_conf_iterations = saved_iters;
 }
 
@@ -539,7 +616,7 @@ void bench_parse_args(int argc, char *argv[])
     }
 
     int opt;
-    while ((opt = getopt(argc, argv, "+t:i:l:m:M:C:K:")) != -1) {
+    while ((opt = getopt(argc, argv, "+t:i:l:m:M:C:K:S:")) != -1) {
         switch (opt) {
         case 't':
             g_conf_nthreads = safe_strtoi(optarg, MIN_THREADS, MAX_THREADS, "threads");
@@ -562,9 +639,12 @@ void bench_parse_args(int argc, char *argv[])
         case 'M':
             g_conf_spin_max = safe_strtoi(optarg, MIN_BACKOFF, MAX_BACKOFF, "spin_max");
             break;
+        case 'S':
+            g_conf_timerslack_ns = safe_strtoi(optarg, 0, INT_MAX, "timer_slack");
+            break;
         case '?':
             if (optopt == 't' || optopt == 'i' || optopt == 'l' || optopt == 'm' || optopt == 'M' ||
-                optopt == 'C' || optopt == 'K') {
+                optopt == 'C' || optopt == 'K' || optopt == 'S') {
                 fprintf(stderr, "Error: Option '-%c' requires an argument.\n", optopt);
             } else {
                 fprintf(stderr, "Error: Unknown option '-%c'.\n", optopt);
@@ -584,6 +664,12 @@ void bench_parse_args(int argc, char *argv[])
     if (optind < argc) {
         fprintf(stderr, "Error: Unexpected positional argument '%s'\n", argv[optind]);
         print_help(argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    if (g_conf_timerslack_ns >= 0 &&
+        prctl(PR_SET_TIMERSLACK, (unsigned long)g_conf_timerslack_ns, 0, 0, 0) != 0) {
+        perror("prctl(PR_SET_TIMERSLACK)");
         exit(EXIT_FAILURE);
     }
 }
@@ -607,6 +693,24 @@ void bench_lock_memory(void)
     }
 }
 
+void bench_calibrate(void)
+{
+    struct nop_calib calib = {.loops = NOP_CALIB_LOOPS, .ns = 0.0};
+    pthread_attr_t attr;
+    pthread_t tid;
+
+    pthread_attr_init(&attr);
+    pin_worker_attr(&attr, 0);
+    const int rc = pthread_create(&tid, &attr, task_calibrate_nop, &calib);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        fprintf(stderr, "Error: calibration pthread_create failed: %s\n", strerror(rc));
+        exit(EXIT_FAILURE);
+    }
+    pthread_join(tid, NULL);
+    g_nop_ns = calib.ns;
+}
+
 void bench_print_config(void)
 {
     char pin_desc[128];
@@ -623,6 +727,8 @@ void bench_print_config(void)
     printf("\n--- SPINLOCK BENCHMARK SUITE START ---\n"
            "System Info:\n"
            "  L1 Cache Line  : %ld bytes\n"
+           "  Timer Slack    : %d ns\n"
+           "  NOP Cost       : %.4f ns\n"
            "Configuration:\n"
            "  Threads        : %d\n"
            "  Iterations     : %d\n"
@@ -632,93 +738,68 @@ void bench_print_config(void)
            "  Memory Lock    : %s\n"
            "  Pinning        : %s\n"
            "--------------------------------------\n\n",
-           g_sys_cache_line_size, g_conf_nthreads, g_conf_iterations, g_conf_load_loops,
-           g_conf_spin_min, g_conf_spin_max, SETTLE_DELAY_MS, g_mlock_status, pin_desc);
+           g_sys_cache_line_size, prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), g_nop_ns, g_conf_nthreads,
+           g_conf_iterations, g_conf_load_loops, g_conf_spin_min, g_conf_spin_max, SETTLE_DELAY_MS,
+           g_mlock_status, pin_desc);
 }
 
-/* Warm every selected contender (MCS last: it can convoy at oversubscription). */
 void bench_warmup_all(void)
 {
-    if (g_run_ttas) {
-        run_warmup(task_spinlock_ttas);
-    }
-    if (g_run_pspin) {
-        run_warmup(task_pthread_spin);
-    }
-    if (g_run_mcs) {
-        run_warmup(task_spinlock_mcs);
+    for (int k = 0; k < BENCH_LOCK_COUNT; ++k) {
+        if (g_locks[k].run) {
+            run_warmup(g_locks[k].task);
+        }
     }
 }
 
-/*
- * Measure in the order TTAS, POSIX, MCS so that if MCS convoys under
- * oversubscription its slow (or timed-out) run cannot delay the others'
- * already-flushed output. Only the -K-selected contenders run.
- */
 void bench_run_all(struct bench_results *results)
 {
+    int printed = 0;
+
     if (!results) {
         return;
     }
 
-    results->ttas_ms = -1.0;
-    results->pspin_ms = -1.0;
-    results->mcs_ms = -1.0;
-
-    int printed = 0;
-    if (g_run_ttas) {
-        results->ttas_ms = run_benchmark("Custom TTAS Spinlock", task_spinlock_ttas);
-        printed = 1;
-    }
-    if (g_run_pspin) {
+    for (int k = 0; k < BENCH_LOCK_COUNT; ++k) {
+        results->ms[k] = -1.0;
+        if (!g_locks[k].run) {
+            continue;
+        }
         if (printed) {
             printf("\n");
         }
-        results->pspin_ms = run_benchmark("POSIX Spinlock", task_pthread_spin);
+        results->ms[k] = run_benchmark(g_locks[k].name, g_locks[k].task);
         printed = 1;
-    }
-    if (g_run_mcs) {
-        if (printed) {
-            printf("\n");
-        }
-        results->mcs_ms = run_benchmark("Custom MCS Spinlock", task_spinlock_mcs);
     }
 }
 
 void bench_print_summary(const struct bench_results *results)
 {
+    static const int order[BENCH_LOCK_COUNT] = {BENCH_TTAS, BENCH_TTAS_PARK, BENCH_MCS, BENCH_PSPIN, BENCH_PMUTEX};
+    const char *winner = NULL;
+    double best = 1e300;
+
     if (!results) {
         return;
     }
 
-    const char *winner = NULL;
-    double best = 1e300;
-    if (g_run_ttas && results->ttas_ms < best) {
-        best = results->ttas_ms;
-        winner = "Custom TTAS Spinlock";
-    }
-    if (g_run_mcs && results->mcs_ms < best) {
-        best = results->mcs_ms;
-        winner = "Custom MCS Spinlock";
-    }
-    if (g_run_pspin && results->pspin_ms < best) {
-        best = results->pspin_ms;
-        winner = "POSIX Spinlock";
+    for (int k = 0; k < BENCH_LOCK_COUNT; ++k) {
+        if (g_locks[k].run && results->ms[k] < best) {
+            best = results->ms[k];
+            winner = g_locks[k].name;
+        }
     }
 
     printf("\n--------------------------------------\n"
            "FINAL RESULT:\n");
-    if (g_run_ttas) {
-        printf("  Custom TTAS    : %10.3f ms\n", results->ttas_ms);
+    for (int i = 0; i < BENCH_LOCK_COUNT; ++i) {
+        const int k = order[i];
+        if (g_locks[k].run) {
+            printf("  %-14s : %10.3f ms\n", g_locks[k].label, results->ms[k]);
+        }
     }
-    if (g_run_mcs) {
-        printf("  Custom MCS     : %10.3f ms\n", results->mcs_ms);
-    }
-    if (g_run_pspin) {
-        printf("  POSIX Spinlock : %10.3f ms\n", results->pspin_ms);
-    }
-    if (g_run_ttas && g_run_pspin) {
-        printf("  TTAS / POSIX   : %.2fx\n", results->pspin_ms / results->ttas_ms);
+    if (g_locks[BENCH_TTAS].run && g_locks[BENCH_PSPIN].run) {
+        printf("  TTAS / POSIX   : %.2fx\n", results->ms[BENCH_PSPIN] / results->ms[BENCH_TTAS]);
     }
     printf("  Winner         : %s\n"
            "--- BENCHMARK SUITE END ---\n\n", winner);
