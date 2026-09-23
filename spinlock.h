@@ -25,21 +25,18 @@ extern int g_conf_spin_max;
 typedef int spinlock_val_t;
 
 /*
- * Two lock disciplines are exposed, each named for its algorithm, both with the
- * same single-argument shape and both running on x86-64 and aarch64:
+ * Three lock disciplines, each named for its algorithm and wait policy, all
+ * running on x86-64 and aarch64:
  *
- *   - spin_lock_ttas : test-and-test-and-set with exponential backoff. For the
- *     short, lightly held critical sections a spinlock is meant for (a flag
- *     flip, a small bounded loop) at thread counts up to the core count it is
- *     the fastest option: an uncontended acquire is a single CAS, and a
- *     just-freed lock can be re-taken with no cross-core cache-line transfer.
- *
- *   - spin_lock_mcs : an MCS queue lock. Every waiter spins on its own local
- *     cache line, so it emits no coherence storm and stays FIFO-fair even at
- *     high core counts. That scalability costs a mandatory cache-line transfer
- *     on every hand-off, so for short critical sections at low-to-modest
- *     contention it measures several times slower than the TTAS lock. Reach for
- *     it only when a great many cores hammer the same lock and fairness matters.
+ *   - spin_lock_ttas      : test-and-test-and-set with exponential backoff
+ *     capped at g_conf_spin_max pause iterations. Pure spin, never sleeps.
+ *   - spin_lock_ttas_park : the same loop, but once the cap is reached every
+ *     further failed CAS calls nanosleep(1 us). The real sleep is 1 us plus
+ *     the thread's timer slack (50 us by default on Linux), so waiters park
+ *     while the holder re-acquires unopposed: throughput over fairness.
+ *   - spin_lock_mcs       : an MCS queue lock. Each waiter spins on its own
+ *     cache line and hand-off is FIFO-fair, at the cost of a cache-line
+ *     transfer per hand-off; it convoys when threads oversubscribe the cores.
  */
 
 typedef struct {
@@ -57,12 +54,13 @@ typedef struct {
  * One MCS waiter record. A thread enqueues its own node on the lock's tail and
  * then spins on its private 'locked' flag; the predecessor flips that flag to
  * pass ownership. Because the flag is local to the waiter, the queue never
- * bounces a single shared line between all the spinners.
+ * bounces a single shared line between all the spinners. Aligned to its own
+ * cache line so one waiter's polled flag never shares a line with another node.
  */
 typedef struct mcs_node {
     struct mcs_node *volatile next;
     volatile spinlock_val_t locked;
-} mcs_node_t;
+} __attribute__((aligned(CACHE_LINE_SIZE))) mcs_node_t;
 
 typedef struct {
     /* Tail of the waiter queue; NULL when the lock is free and unqueued. */
@@ -86,24 +84,93 @@ static inline void cpu_relax(void)
 
 static inline void spin_init_ttas(spinlock_ttas_t *lock)
 {
-    if (!lock) {
-        return;
-    }
 
     lock->is_locked = IS_SPINLOCK_UNLOCKED;
 }
 
-static inline void spin_lock_ttas(spinlock_ttas_t *lock)
+static inline int ttas_cas_acquire(spinlock_ttas_t *lock)
 {
+    int desired = IS_SPINLOCK_LOCKED;
+    /*
+     * 'expected' is UNLOCKED on entry to every attempt. A failed CAS
+     * overwrites it with the lock's current value (x86 'cmpxchg' leaves it
+     * in EAX, arm64 'ldaxr' loads it into the output register, and arm64
+     * LSE 'casa' always writes the prior value back into it), so the
+     * comparison baseline must be reloaded for the next try.
+     */
+    int expected = IS_SPINLOCK_UNLOCKED;
+
+#if defined(__x86_64__)
+    /*
+     * Test-and-Set (Atomic CAS)
+     * Operates on three values: memory (%1), EAX (%0), and desired (%2).
+     * - SUCCESS: memory == EAX(0). Memory becomes 1. EAX stays 0.
+     * - FAILURE: memory != EAX(0). EAX becomes 1 (loads memory).
+     */
+    asm volatile("lock cmpxchgl %2, %1"
+                 : "+a"(expected), "+m"(lock->is_locked)
+                 : "r"(desired)
+                 : "memory");
+#elif defined(__aarch64__)
+#if defined(__ARM_FEATURE_ATOMICS)
+    /*
+     * Test-and-Set via the ARMv8.1-A LSE atomics extension.
+     * 'casa' is a single-instruction load-ACQUIRE compare-and-swap:
+     *   - it compares memory (%[mem]) against 'expected' (preloaded to
+     *     UNLOCKED above),
+     *   - if they match it stores 'desired' (LOCKED),
+     *   - and it ALWAYS writes the prior memory value back into 'expected'.
+     * The acquire variant establishes the critical-section ordering, so
+     * unlike the LL/SC fallback there is no exclusive monitor to lose and
+     * no retry loop. This scales far better under heavy contention on
+     * high-core-count machines. Selected only when the toolchain targets an
+     * LSE-capable CPU (build with e.g. -march=armv8.1-a or
+     * -march=armv8-a+lse); otherwise __ARM_FEATURE_ATOMICS is undefined and
+     * the ldaxr/stlxr path below is emitted instead.
+     */
+    asm volatile("casa %w[exp], %w[des], %[mem]"
+                 : [exp] "+r"(expected), [mem] "+Q"(lock->is_locked)
+                 : [des] "r"(desired)
+                 : "memory");
+#else
+    /*
+     * Test-and-Set (Atomic CAS) on weakly-ordered arm64 without LSE.
+     * 'ldaxr' is a load-ACQUIRE exclusive, so a successful acquire also
+     * establishes acquire ordering for the critical section. The LL/SC
+     * pair retries only when the exclusive reservation is lost; a value
+     * mismatch leaves the observed value in 'expected' (mirroring x86
+     * cmpxchg) and clears the monitor via 'clrex'.
+     */
+    {
+        int fail;
+        asm volatile("1: ldaxr   %w[old], %[mem]\n\t"
+                     "   cmp     %w[old], %w[exp]\n\t"
+                     "   b.ne    2f\n\t"
+                     "   stlxr   %w[st], %w[des], %[mem]\n\t"
+                     "   cbnz    %w[st], 1b\n\t"
+                     "   b       3f\n\t"
+                     "2: clrex\n\t"
+                     "3:"
+                     : [old] "=&r"(expected), [st] "=&r"(fail), [mem] "+Q"(lock->is_locked)
+                     : [exp] "r"(IS_SPINLOCK_UNLOCKED), [des] "r"(desired)
+                     : "memory", "cc");
+    }
+#endif
+#endif
+
+    /*
+     * If expected is still 0, we won the race and successfully
+     * flipped the bit from 0 to 1.
+     */
+    return expected == IS_SPINLOCK_UNLOCKED;
+}
+
+static inline void ttas_acquire(spinlock_ttas_t *lock, int park)
+{
+    const struct timespec park_ts = {.tv_sec = 0, .tv_nsec = 1000};
     int spin_max = g_conf_spin_max;
     int backoff = g_conf_spin_min;
-    int desired = IS_SPINLOCK_LOCKED;
-    int expected;
     int i;
-
-    if (!lock) {
-        return;
-    }
 
     while (1) {
         /*
@@ -112,82 +179,11 @@ static inline void spin_lock_ttas(spinlock_ttas_t *lock)
          * on the bus. We only proceed to the atomic "Set" phase when
          * we observe the lock is likely free (is_locked == 0).
          */
-        while (__builtin_expect(lock->is_locked, IS_SPINLOCK_LOCKED) == desired) {
+        while (__builtin_expect(lock->is_locked, IS_SPINLOCK_LOCKED) == IS_SPINLOCK_LOCKED) {
             cpu_relax();
         }
 
-        /*
-         * Reset 'expected' to UNLOCKED before every attempt. A failed CAS
-         * overwrites it with the lock's current value (x86 'cmpxchg' leaves it
-         * in EAX, arm64 'ldaxr' loads it into the output register, and arm64
-         * LSE 'casa' always writes the prior value back into it), so the
-         * comparison baseline must be reloaded for the next try.
-         */
-        expected = IS_SPINLOCK_UNLOCKED;
-
-#if defined(__x86_64__)
-        /*
-         * Test-and-Set (Atomic CAS)
-         * Operates on three values: memory (%1), EAX (%0), and desired (%2).
-         * - SUCCESS: memory == EAX(0). Memory becomes 1. EAX stays 0.
-         * - FAILURE: memory != EAX(0). EAX becomes 1 (loads memory).
-         */
-        asm volatile("lock cmpxchgl %2, %1"
-                     : "+a"(expected), "+m"(lock->is_locked)
-                     : "r"(desired)
-                     : "memory");
-#elif defined(__aarch64__)
-#if defined(__ARM_FEATURE_ATOMICS)
-        /*
-         * Test-and-Set via the ARMv8.1-A LSE atomics extension.
-         * 'casa' is a single-instruction load-ACQUIRE compare-and-swap:
-         *   - it compares memory (%[mem]) against 'expected' (preloaded to
-         *     UNLOCKED above),
-         *   - if they match it stores 'desired' (LOCKED),
-         *   - and it ALWAYS writes the prior memory value back into 'expected'.
-         * The acquire variant establishes the critical-section ordering, so
-         * unlike the LL/SC fallback there is no exclusive monitor to lose and
-         * no retry loop. This scales far better under heavy contention on
-         * high-core-count machines. Selected only when the toolchain targets an
-         * LSE-capable CPU (build with e.g. -march=armv8.1-a or
-         * -march=armv8-a+lse); otherwise __ARM_FEATURE_ATOMICS is undefined and
-         * the ldaxr/stlxr path below is emitted instead.
-         */
-        asm volatile("casa %w[exp], %w[des], %[mem]"
-                     : [exp] "+r"(expected), [mem] "+Q"(lock->is_locked)
-                     : [des] "r"(desired)
-                     : "memory");
-#else
-        /*
-         * Test-and-Set (Atomic CAS) on weakly-ordered arm64 without LSE.
-         * 'ldaxr' is a load-ACQUIRE exclusive, so a successful acquire also
-         * establishes acquire ordering for the critical section. The LL/SC
-         * pair retries only when the exclusive reservation is lost; a value
-         * mismatch leaves the observed value in 'expected' (mirroring x86
-         * cmpxchg) and clears the monitor via 'clrex'.
-         */
-        {
-            int fail;
-            asm volatile("1: ldaxr   %w[old], %[mem]\n\t"
-                         "   cmp     %w[old], %w[exp]\n\t"
-                         "   b.ne    2f\n\t"
-                         "   stlxr   %w[st], %w[des], %[mem]\n\t"
-                         "   cbnz    %w[st], 1b\n\t"
-                         "   b       3f\n\t"
-                         "2: clrex\n\t"
-                         "3:"
-                         : [old] "=&r"(expected), [st] "=&r"(fail), [mem] "+Q"(lock->is_locked)
-                         : [exp] "r"(IS_SPINLOCK_UNLOCKED), [des] "r"(desired)
-                         : "memory", "cc");
-        }
-#endif
-#endif
-
-        /*
-         * If expected is still 0, we won the race and successfully
-         * flipped the bit from 0 to 1.
-         */
-        if (expected == IS_SPINLOCK_UNLOCKED) {
+        if (ttas_cas_acquire(lock)) {
             return;
         }
 
@@ -198,21 +194,25 @@ static inline void spin_lock_ttas(spinlock_ttas_t *lock)
         backoff *= 2;
         if (backoff > spin_max) {
             backoff = spin_max;
-            const struct timespec sleep_ts = {
-                .tv_sec = 0,
-                .tv_nsec = 1000
-            };
-            nanosleep(&sleep_ts, NULL);
+            if (park) {
+                nanosleep(&park_ts, NULL);
+            }
         }
     }
 }
 
+static inline void spin_lock_ttas(spinlock_ttas_t *lock)
+{
+    ttas_acquire(lock, 0);
+}
+
+static inline void spin_lock_ttas_park(spinlock_ttas_t *lock)
+{
+    ttas_acquire(lock, 1);
+}
+
 static inline void spin_unlock_ttas(spinlock_ttas_t *lock)
 {
-    if (!lock) {
-        return;
-    }
-
 #if defined(__x86_64__)
     /*
      * It prevents the compiler from moving any memory operations from
@@ -363,37 +363,22 @@ static inline void mcs_store_release_flag(volatile spinlock_val_t *p, spinlock_v
 }
 
 /*
- * The waiter record lives in thread-local storage so spin_lock_mcs keeps the
- * same single-argument shape as the TTAS lock. Two consequences, both fine for
- * the short critical sections a spinlock targets: a thread holds at most one MCS
- * lock at a time and never nests acquisitions (a second concurrent acquire would
- * reuse the node the first is still parked on); and because this node and its
- * accessors are static-inline in the header, each translation unit gets its own
- * copy, so a given lock's spin_lock_mcs and spin_unlock_mcs must be compiled in
- * the same TU.
- *
- * Aligned to its own cache line so that one waiter's 'locked' flag, which it
- * polls in a tight loop, never shares a line with another thread's node and
- * turns the local spin back into cross-core coherence traffic.
+ * Per-thread node behind the single-argument spin_lock_mcs / spin_unlock_mcs
+ * wrappers. It is static in a header, so each translation unit gets its own
+ * copy: a lock taken through the wrapper must be released in the same TU, and
+ * the wrapper cannot nest. spin_lock_mcs_node / spin_unlock_mcs_node take the
+ * node explicitly and have neither limit.
  */
-static __thread mcs_node_t spin_mcs_self __attribute__((aligned(CACHE_LINE_SIZE)));
+static __thread mcs_node_t spin_mcs_self;
 
 static inline void spin_init_mcs(spinlock_mcs_t *lock)
 {
-    if (!lock) {
-        return;
-    }
 
     lock->tail = (mcs_node_t *)0;
 }
 
-static inline void spin_lock_mcs(spinlock_mcs_t *lock)
+static inline void spin_lock_mcs_node(spinlock_mcs_t *lock, mcs_node_t *me)
 {
-    if (!lock) {
-        return;
-    }
-
-    mcs_node_t *me = &spin_mcs_self;
     me->next = (mcs_node_t *)0;
 
     /*
@@ -417,13 +402,8 @@ static inline void spin_lock_mcs(spinlock_mcs_t *lock)
     }
 }
 
-static inline void spin_unlock_mcs(spinlock_mcs_t *lock)
+static inline void spin_unlock_mcs_node(spinlock_mcs_t *lock, mcs_node_t *me)
 {
-    if (!lock) {
-        return;
-    }
-
-    mcs_node_t *me = &spin_mcs_self;
     mcs_node_t *next = mcs_load_acquire_node(&me->next);
 
     if (!next) {
@@ -446,6 +426,16 @@ static inline void spin_unlock_mcs(spinlock_mcs_t *lock)
 
     /* Hand the lock over by clearing the successor's private flag (RELEASE). */
     mcs_store_release_flag(&next->locked, IS_SPINLOCK_UNLOCKED);
+}
+
+static inline void spin_lock_mcs(spinlock_mcs_t *lock)
+{
+    spin_lock_mcs_node(lock, &spin_mcs_self);
+}
+
+static inline void spin_unlock_mcs(spinlock_mcs_t *lock)
+{
+    spin_unlock_mcs_node(lock, &spin_mcs_self);
 }
 
 #endif
