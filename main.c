@@ -1,11 +1,11 @@
+#include "spinlock_test.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "./spinlock_test.h"
-
 int main(int argc, char *argv[])
 {
-    struct bench_results results;
+    struct bench_results benchmark_results;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
 
@@ -16,8 +16,8 @@ int main(int argc, char *argv[])
     bench_print_config();
 
     bench_warmup_all();
-    bench_run_all(&results);
-    bench_print_summary(&results);
+    bench_run_all(&benchmark_results);
+    bench_print_summary(&benchmark_results);
 
     bench_cleanup();
 

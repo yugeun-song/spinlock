@@ -1,6 +1,6 @@
 CC ?= gcc
 BIN_DIR := bin
-SRCS := spinlock_test.c main.c
+SRCS := spinlock.c spinlock_test.c main.c
 HDRS := spinlock.h spinlock_test.h
 
 TARGET_RELEASE := $(BIN_DIR)/spinlock_test
@@ -9,8 +9,8 @@ TARGET_TRACE := $(BIN_DIR)/spinlock_test_trace
 # Target-architecture flags. Keyed off the compiler's own target triple (via
 # -dumpmachine) so it is correct for both native and cross builds, e.g.
 #   make CC=aarch64-linux-gnu-gcc
-# On aarch64 the ARMv8-A baseline emits the ldaxr/stlxr LL/SC atomics that run on
-# every ARMv8 core. Opt into the ARMv8.1-A LSE fast path (casa / swpal / casl,
+# On aarch64 the v8.0 baseline emits the ldaxr/stlxr LL/SC atomics that run on
+# every aarch64 core. Opt into the v8.1 LSE fast path (casa / swpal / casl,
 # which sets __ARM_FEATURE_ATOMICS) explicitly with:
 #   make ARCH_CFLAGS='-march=armv8.1-a'
 # x86-64 needs no arch flag (the custom asm targets the base ISA).
@@ -24,7 +24,7 @@ COMMON_CFLAGS := -std=gnu99 $(WARN_FLAGS) $(ARCH_CFLAGS) -fno-omit-frame-pointer
 LDLIBS := -pthread
 
 RELEASE_CFLAGS := -O3 $(COMMON_CFLAGS)
-TRACE_CFLAGS := -O0 -g3 $(COMMON_CFLAGS) \
+TRACE_CFLAGS := -O0 -g3 -DSPINLOCK_DEBUG $(COMMON_CFLAGS) \
                 -fno-inline -fno-inline-functions \
                 -fno-optimize-sibling-calls
 TRACE_LDFLAGS := -rdynamic

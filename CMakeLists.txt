@@ -12,7 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
-set(SRCS spinlock_test.c main.c)
+set(SRCS spinlock.c spinlock_test.c main.c)
 
 set(COMMON_OPTS
     -Wall
@@ -21,8 +21,8 @@ set(COMMON_OPTS
     -fasynchronous-unwind-tables
 )
 
-# aarch64: ARMv8-A baseline emits the ldaxr/stlxr LL/SC atomics that run on every
-# ARMv8 core. Turn on the ARMv8.1-A LSE fast path (casa/swpal/casl) explicitly
+# aarch64: the v8.0 baseline emits the ldaxr/stlxr LL/SC atomics that run on every
+# aarch64 core. Turn on the v8.1 LSE fast path (casa/swpal/casl) explicitly
 # with -DARCH_LSE=ON. x86-64 needs no arch flag. The target is read from the
 # compiler's own triple so it is correct for both native and cross builds
 # (e.g. -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc); CMAKE_SYSTEM_PROCESSOR would
@@ -30,7 +30,7 @@ set(COMMON_OPTS
 execute_process(COMMAND ${CMAKE_C_COMPILER} -dumpmachine
                 OUTPUT_VARIABLE TARGET_TRIPLE OUTPUT_STRIP_TRAILING_WHITESPACE)
 if(TARGET_TRIPLE MATCHES "aarch64")
-    option(ARCH_LSE "Target ARMv8.1-A LSE atomics (casa/swpal/casl)" OFF)
+    option(ARCH_LSE "Target the aarch64 v8.1 LSE atomics (casa/swpal/casl)" OFF)
     if(ARCH_LSE)
         list(APPEND COMMON_OPTS -march=armv8.1-a)
     else()
@@ -41,6 +41,7 @@ endif()
 set(TRACE_OPTS
     -O0
     -g3
+    -DSPINLOCK_DEBUG
     -fno-inline
     -fno-inline-functions
     -fno-optimize-sibling-calls
