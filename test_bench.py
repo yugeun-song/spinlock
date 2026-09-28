@@ -86,7 +86,7 @@ def get_system_info() -> tuple[str, int, str]:
 def detect_perf_cores() -> list[int]:
     """Return the CPUs in the highest-max-frequency group (the P-cores).
 
-    On heterogeneous machines (Intel P/E, ARM big.LITTLE) pinning to a single
+    On heterogeneous machines (Intel P/E, aarch64 big.LITTLE) pinning to a single
     homogeneous, fastest class is the largest single lever on run-to-run
     variance: it stops the scheduler from scattering workers across fast and
     slow cores. Returns [] when the machine is homogeneous or cpufreq is
