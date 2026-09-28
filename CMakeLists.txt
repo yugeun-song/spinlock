@@ -12,7 +12,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
-set(SRCS spinlock.c spinlock_test.c main.c)
+set(LIB_SRCS spinlock.c)
+set(BENCH_SRCS spinlock_test.c main.c)
+set(CHECK_SRCS spinlock_check.c)
 
 set(COMMON_OPTS
     -Wall
@@ -49,11 +51,24 @@ set(TRACE_OPTS
 
 find_package(Threads REQUIRED)
 
-add_executable(spinlock_test ${SRCS})
+add_executable(spinlock_test ${LIB_SRCS} ${BENCH_SRCS})
 target_compile_options(spinlock_test PRIVATE ${COMMON_OPTS} -O3)
 target_link_libraries(spinlock_test PRIVATE Threads::Threads)
 
-add_executable(spinlock_test_trace ${SRCS})
+add_executable(spinlock_test_trace ${LIB_SRCS} ${BENCH_SRCS})
 target_compile_options(spinlock_test_trace PRIVATE ${COMMON_OPTS} ${TRACE_OPTS})
 target_link_options(spinlock_test_trace PRIVATE -rdynamic)
 target_link_libraries(spinlock_test_trace PRIVATE Threads::Threads)
+
+add_executable(spinlock_check ${LIB_SRCS} ${CHECK_SRCS})
+target_compile_options(spinlock_check PRIVATE ${COMMON_OPTS} -O3)
+target_link_libraries(spinlock_check PRIVATE Threads::Threads)
+
+add_executable(spinlock_check_trace ${LIB_SRCS} ${CHECK_SRCS})
+target_compile_options(spinlock_check_trace PRIVATE ${COMMON_OPTS} ${TRACE_OPTS})
+target_link_options(spinlock_check_trace PRIVATE -rdynamic)
+target_link_libraries(spinlock_check_trace PRIVATE Threads::Threads)
+
+enable_testing()
+add_test(NAME spinlock_check COMMAND spinlock_check)
+add_test(NAME spinlock_check_trace COMMAND spinlock_check_trace)
