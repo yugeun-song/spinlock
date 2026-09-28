@@ -1,0 +1,49 @@
+# Project clangd configuration. It rides on compile_commands.json, which
+# 'make all' (or 'make compdb') writes with the exact release flags, so every
+# translation unit and every header is parsed as gnu99 C for this target
+# instead of clangd's fallback (a bare 'clang <file>' that treats a .h as
+# Objective-C++). That fallback is where the spurious errors came from.
+CompileFlags:
+  Add:
+    - -Wno-unknown-warning-option
+    - -Wno-unused-command-line-argument
+    - -ferror-limit=0
+  Remove:
+    - -fcf-protection=*
+    - -mbranch-protection=*
+    - -fstack-clash-protection
+    - -fasynchronous-unwind-tables
+    - -fno-inline-functions
+    - -fno-optimize-sibling-calls
+
+Diagnostics:
+  UnusedIncludes: Strict
+  MissingIncludes: None
+  ClangTidy:
+    Add:
+      - bugprone-*
+      - cert-*
+      - clang-analyzer-*
+      - misc-*
+      - performance-*
+      - portability-*
+      - readability-*
+    Remove:
+      - bugprone-easily-swappable-parameters
+      - bugprone-reserved-identifier
+      - cert-dcl37-c
+      - cert-dcl51-cpp
+      - cert-err33-c
+      - concurrency-mt-unsafe
+      - misc-include-cleaner
+      - readability-braces-around-statements
+      - readability-function-cognitive-complexity
+      - readability-identifier-length
+      - readability-magic-numbers
+      - readability-use-concise-preprocessor-directives
+
+Index:
+  Background: Build
+
+InlayHints:
+  Enabled: No

@@ -1,0 +1,30 @@
+# Mirrors the ClangTidy block of .clangd so 'make tidy' and the editor agree.
+# Removed checks are noise on this code base, not bugs: printf return values
+# (cert-err33-c), getopt/strtol/exit flagged as not thread-safe from a
+# single-threaded main (concurrency-mt-unsafe), the '#if defined(...)' chains
+# that keep '#elif' legible (use-concise-preprocessor-directives), _GNU_SOURCE
+# (reserved-identifier), and clangd already runs its own include cleaner.
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c,
+  -concurrency-mt-unsafe,
+  -misc-include-cleaner,
+  -readability-braces-around-statements,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-use-concise-preprocessor-directives
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*'
+FormatStyle: file
