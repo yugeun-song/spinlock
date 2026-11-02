@@ -228,7 +228,7 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
 def write_csv(path: Path, results_raw: list[list[dict[str, list[float]]]],
               results_iters: list[list[int]], threads_range: list[int]) -> None:
     with path.open("w", newline="") as f:
-        w = csv.writer(f)
+        w = csv.writer(f, lineterminator="\n")
         w.writerow(["workload_nops", "threads", "lock", "iterations",
                     "run_idx", "time_ms_normalized_to_1m_iters"])
         for i, wl in enumerate(WORKLOAD_RANGE):
