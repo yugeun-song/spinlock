@@ -2,20 +2,23 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
+import json
 import os
 import platform
-import re
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
-
-import json
 
 import numpy as np
 
 REPEATS: int = 7
-WARMUP_RUNS: int = 1
+REPEATS_MAX: int = 14
+NOISY_CELL_CV: float = 0.05
+WARMUP_LAUNCHES: int = 3
+LAUNCH_TIMEOUT_SEC: int = 120
 # Quiescent gap between consecutive benchmark process launches, so each run
 # starts from a settled system (scheduler drained, CPU frequency relaxed,
 # previous run's cache/turbo residue dissipated) instead of inheriting the
@@ -34,26 +37,27 @@ CSV_PATH: Path = Path("bench_results.csv")
 PNG_PATH: Path = Path("bench_result.png")
 META_PATH: Path = Path("bench_meta.json")
 
-# CSV/plot keys in the harness's -K spelling, with the block title each prints.
 LOCKS: list[str] = ["ttas", "ttas_park", "mcs", "pspin", "pmutex"]
-LOCK_TITLE: dict[str, str] = {
-    "ttas": "Custom TTAS Spinlock",
-    "ttas_park": "Custom TTAS Spin+Park",
-    "mcs": "Custom MCS Spinlock",
-    "pspin": "POSIX Spinlock",
-    "pmutex": "POSIX Mutex",
-}
-RE_ELAPSED: dict[str, re.Pattern] = {
-    lock: re.compile(re.escape(title) + r"\s+\]\s+- Elapsed Time :\s+([\d.]+)")
-    for lock, title in LOCK_TITLE.items()
-}
-RE_NOP_NS = re.compile(r"NOP Cost\s+:\s+([\d.]+) ns")
-RE_SLACK_NS = re.compile(r"Timer Slack\s+:\s+(\d+) ns")
+CSV_FIELDS: list[str] = ["workload_nops", "threads", "lock", "iterations", "run_idx", "launch_index",
+                         "run_position", "time_ms_normalized_to_1m_iters", "fairness_min_over_max",
+                         "load_1min"]
 
 
 def mad(arr: np.ndarray) -> float:
     med = np.median(arr)
     return float(np.median(np.abs(arr - med)) * 1.4826)
+
+
+def robust_cv(values: np.ndarray) -> float:
+    median = float(np.median(values))
+    return mad(values) / median if median > 0 else 0.0
+
+
+def read_load_average() -> float:
+    try:
+        return float(Path("/proc/loadavg").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return float("nan")
 
 
 def get_cpu_model() -> str:
@@ -126,75 +130,127 @@ def pick_iterations(workload: int) -> int:
     return 100_000
 
 
-def run_bench(benchmark_bin: Path, threads: int, workload: int, pin_cores: list[int], run_mcs: bool,
-              env: dict[str, list]) -> tuple[dict[str, list[float]], int]:
+def locks_for(threads: int, core_budget: int) -> list[str]:
+    # Drop the MCS contender once threads oversubscribe the cores: a strict
+    # FIFO queue lock convoys there (a preempted successor stalls the whole
+    # queue), which would dominate wall-clock and starve the other samples.
+    return [lock for lock in LOCKS if threads <= core_budget or lock != "mcs"]
+
+
+def run_launch(benchmark_bin: Path, threads: int, workload: int, pin_cores: list[int],
+               lock_order: list[str]) -> dict[str, dict] | None:
     iterations = pick_iterations(workload)
+    command = [str(benchmark_bin), "-F", "csv", "-t", str(threads), "-l", str(workload),
+               "-i", str(iterations), "-K", ",".join(lock_order)]
+    if pin_cores:
+        command += ["-C", ",".join(map(str, pin_cores))]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        print(f"\nWarning: launch timed out (threads={threads}, workload={workload})", file=sys.stderr)
+        return None
+    rows = {row["lock"]: row for row in csv.DictReader(io.StringIO(completed.stdout))}
+    if completed.returncode != 0 or set(rows) != set(lock_order) or \
+            any(row["count_ok"] != "1" for row in rows.values()):
+        print(f"\nWarning: rejected launch (threads={threads}, workload={workload}, "
+              f"exit {completed.returncode}) {completed.stderr.strip()[:160]}", file=sys.stderr)
+        return None
     scale = 1_000_000 / iterations
-    locks = [lock for lock in LOCKS if run_mcs or lock != "mcs"]
-    raw: dict[str, list[float]] = {lock: [] for lock in LOCKS}
-
-    for run_idx in range(REPEATS + WARMUP_RUNS):
-        # Let the machine settle between launches so one run cannot perturb the
-        # next; skip the wait before the very first launch.
-        if run_idx > 0:
-            time.sleep(SETTLE_SEC)
-        cmd = [
-            str(benchmark_bin),
-            "-t", str(threads),
-            "-l", str(workload),
-            "-i", str(iterations),
-        ]
-        if pin_cores:
-            cmd += ["-C", ",".join(map(str, pin_cores))]
-        # Drop the MCS contender once threads oversubscribe the cores: a strict
-        # FIFO queue lock convoys there (a preempted successor stalls the whole
-        # queue), which would dominate wall-clock and starve the other samples.
-        cmd += ["-K", ",".join(locks)]
-        try:
-            res = subprocess.run(
-                cmd,
-                capture_output=True, text=True, check=True, timeout=120,
-            ).stdout
-        except subprocess.TimeoutExpired as e:
-            # Should not happen now MCS is skipped when it would convoy; keep any
-            # output flushed before the timeout (MCS runs last) as a net.
-            res = e.stdout or ""
-            print(f"\nWarning: benchmark timed out (threads={threads}, workload={workload})",
-                  file=sys.stderr)
-        except subprocess.CalledProcessError as e:
-            print(f"\nWarning: benchmark failed (threads={threads}, workload={workload}): {e}",
-                  file=sys.stderr)
-            continue
-
-        found = {lock: RE_ELAPSED[lock].search(res) for lock in locks}
-        if not all(found.values()):
-            continue
-
-        if run_idx < WARMUP_RUNS:
-            continue
-
-        for lock, m in found.items():
-            raw[lock].append(float(m.group(1)) * scale)
-        for key, rx in (("nop_ns", RE_NOP_NS), ("timer_slack_ns", RE_SLACK_NS)):
-            m = rx.search(res)
-            if m:
-                env.setdefault(key, []).append(float(m.group(1)))
-
-    return raw, iterations
+    measured: dict[str, dict] = {}
+    for lock, row in rows.items():
+        elapsed_ms = float(row["elapsed_ms"])
+        measured[lock] = {
+            "time_ms": elapsed_ms * scale,
+            "run_position": int(row["run_position"]),
+            "fairness": float(row["earliest_done_ms"]) / elapsed_ms if elapsed_ms > 0 else 1.0,
+            "nop_ns": float(row["nop_ns"]),
+            "timer_slack_ns": int(row["timer_slack_ns"]),
+        }
+    return measured
 
 
-def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list[dict],
-                 threads_range: list[int], total_raw_cycles: int, duration: float,
-                 pin_desc: str, env: dict[str, list]) -> None:
+class SweepRunner:
+    def __init__(self, benchmark_bin: Path, pin_cores: list[int], core_budget: int,
+                 rng: np.random.Generator) -> None:
+        self.benchmark_bin = benchmark_bin
+        self.pin_cores = pin_cores
+        self.core_budget = core_budget
+        self.rng = rng
+        self.launches_by_cell: dict[tuple[int, int], list[dict]] = defaultdict(list)
+        self.launch_index = 0
+        self.failed_launches = 0
+        self.planned_launches = 0
+        self.finished_launches = 0
+
+    def launch(self, workload: int, threads: int) -> tuple[dict[str, dict] | None, float]:
+        lock_order = [str(lock) for lock in self.rng.permutation(locks_for(threads, self.core_budget))]
+        time.sleep(SETTLE_SEC)
+        load_1min = read_load_average()
+        return run_launch(self.benchmark_bin, threads, workload, self.pin_cores, lock_order), load_1min
+
+    def warm_up(self, cells: list[tuple[int, int]]) -> None:
+        for cell_index in self.rng.choice(len(cells), WARMUP_LAUNCHES):
+            workload, threads = cells[int(cell_index)]
+            self.launch(workload, threads)
+
+    def run_schedule(self, schedule: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        self.planned_launches += len(schedule)
+        failed_cells: list[tuple[int, int]] = []
+        for workload, threads in schedule:
+            measured, load_1min = self.launch(workload, threads)
+            self.finished_launches += 1
+            if measured is None:
+                self.failed_launches += 1
+                failed_cells.append((workload, threads))
+            else:
+                self.launches_by_cell[(workload, threads)].append(
+                    {"launch_index": self.launch_index, "load_1min": load_1min, "locks": measured})
+                self.launch_index += 1
+            percent = self.finished_launches / self.planned_launches * 100
+            sys.stdout.write(f"\rProgress: [{'=' * int(percent // 2):<50}] {percent:5.1f}% "
+                             f"(launch {self.finished_launches}/{self.planned_launches}, "
+                             f"{workload} NOPs, {threads} threads)   ")
+            sys.stdout.flush()
+        return failed_cells
+
+    def lock_values(self, cell: tuple[int, int], lock: str) -> np.ndarray:
+        return np.asarray([record["locks"][lock]["time_ms"] for record in self.launches_by_cell[cell]
+                           if lock in record["locks"]], float)
+
+    def cell_spread(self, cell: tuple[int, int]) -> float:
+        spreads = [robust_cv(values) for lock in LOCKS
+                   if (values := self.lock_values(cell, lock)).size >= 3]
+        return max(spreads) if spreads else 0.0
+
+    def shuffled(self, schedule: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        return [schedule[int(index)] for index in self.rng.permutation(len(schedule))]
+
+
+def paired_median_ratio(runner: SweepRunner, cell: tuple[int, int], numerator: str) -> float:
+    ratios = [record["locks"][numerator]["time_ms"] / record["locks"]["ttas"]["time_ms"]
+              for record in runner.launches_by_cell[cell]
+              if numerator in record["locks"] and "ttas" in record["locks"]]
+    return float(np.median(ratios)) if ratios else 0.0
+
+
+def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunner,
+                 cells: list[tuple[int, int]], threads_range: list[int], duration: float,
+                 pin_desc: str, seed: int) -> None:
     sep = "=" * 170
     line = "-" * 170
-    nop_ns = float(np.median(env["nop_ns"])) if env.get("nop_ns") else 0.0
-    slack = int(np.median(env["timer_slack_ns"])) if env.get("timer_slack_ns") else -1
+    records = [record for cell in cells for record in runner.launches_by_cell[cell]]
+    nop_values = [values["nop_ns"] for record in records for values in record["locks"].values()]
+    slack_values = [values["timer_slack_ns"] for record in records for values in record["locks"].values()]
+    nop_ns = float(np.median(nop_values)) if nop_values else 0.0
+    slack = int(np.median(slack_values)) if slack_values else -1
+    loads = np.asarray([record["load_1min"] for record in records], float)
+    total_raw_cycles = sum(pick_iterations(workload) * threads * len(record["locks"])
+                           for workload, threads in cells for record in runner.launches_by_cell[(workload, threads)])
 
     print(f"\n{sep}")
     print("SYSTEM & PERFORMANCE REPORT: HYBRID SPINLOCK BENCHMARK")
     print(sep)
-    print(f"HARDWARE SPECIFICATIONS:")
+    print("HARDWARE SPECIFICATIONS:")
     print(f"  - CPU Model       : {cpu_model}")
     print(f"  - CPU Cores       : {num_cpus} Online / {os.cpu_count()} Logical")
     print(f"  - L1 Cache Line   : {l1_cache} bytes")
@@ -202,55 +258,77 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, report_data: list
     print(f"  - NOP Cost        : {nop_ns:.4f} ns (measured by the harness)")
     print(f"  - Timer Slack     : {slack} ns")
     print(line)
-    print(f"TEST PARAMETERS:")
-    print(f"  - Aggregation     : Median ± MAD of {REPEATS} runs (+ {WARMUP_RUNS} warmup discarded)")
-    print(f"  - Normalization   : 1,000,000 Lock/Unlock cycles")
+    print("TEST PARAMETERS:")
+    print(f"  - Aggregation     : Median ± MAD of {REPEATS}-{REPEATS_MAX} runs per cell "
+          f"(more when robust CV > {NOISY_CELL_CV:.0%}), {WARMUP_LAUNCHES} warmup launches discarded")
+    print(f"  - Schedule        : shuffled launches, shuffled lock order per launch, seed {seed}")
+    print(f"  - Launches        : {runner.launch_index} kept, {runner.failed_launches} rejected")
+    if loads.size and np.isfinite(loads).any():
+        print(f"  - Load (1 min)    : median {np.nanmedian(loads):.2f}, max {np.nanmax(loads):.2f}")
+    print("  - Normalization   : 1,000,000 Lock/Unlock cycles")
     print(f"  - Total Raw Ops   : {total_raw_cycles:,} cycles performed")
     print(f"  - Pinning         : {pin_desc}")
     print(f"  - Bench Duration  : {duration:.2f} seconds")
     print(sep)
-    print(f"{'Workload (NOPs)':<16} | {'CS (ns)':<8} | {'Threads':<8} | {'Iters':<9} | "
+    print(f"{'Workload (NOPs)':<16} | {'CS (ns)':<8} | {'Threads':<8} | {'Runs':<5} | "
           f"{'TTAS (ms)':<18} | {'TTAS park (ms)':<18} | {'MCS (ms)':<18} | "
-          f"{'PSpin (ms)':<18} | {'PMutex (ms)':<18} | {'TTAS/PSpin':<10}")
+          f"{'PSpin (ms)':<18} | {'PMutex (ms)':<18} | {'PSpin/TTAS':<10}")
     print(line)
 
-    for d in report_data:
-        cells = []
+    for workload, threads in cells:
+        texts = []
         for lock in LOCKS:
-            med, mad_v = d["med"][lock], d["mad"][lock]
-            cells.append(f"{med:.3f} ±{mad_v:.1f}" if med is not None else "— (skipped)")
-        print(f"{d['workload']:<16} | {d['workload'] * nop_ns:<8.1f} | {d['t']:<8} | {d['iters']:<9} | "
-              + " | ".join(f"{c:<18}" for c in cells) + f" | {d['ratio']:.2f}x")
-        if d['t'] == threads_range[-1]:
+            values = runner.lock_values((workload, threads), lock)
+            texts.append(f"{np.median(values):.3f} ±{mad(values):.1f}" if values.size else "— (skipped)")
+        runs = len(runner.launches_by_cell[(workload, threads)])
+        ratio = paired_median_ratio(runner, (workload, threads), "pspin")
+        print(f"{workload:<16} | {workload * nop_ns:<8.1f} | {threads:<8} | {runs:<5} | "
+              + " | ".join(f"{text:<18}" for text in texts) + f" | {ratio:.2f}x")
+        if threads == threads_range[-1]:
             print(line)
 
 
-def write_csv(path: Path, results_raw: list[list[dict[str, list[float]]]],
-              results_iters: list[list[int]], threads_range: list[int]) -> None:
+def write_csv(path: Path, runner: SweepRunner, cells: list[tuple[int, int]]) -> None:
     with path.open("w", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
-        w.writerow(["workload_nops", "threads", "lock", "iterations",
-                    "run_idx", "time_ms_normalized_to_1m_iters"])
-        for i, wl in enumerate(WORKLOAD_RANGE):
-            for j, t in enumerate(threads_range):
-                iters = results_iters[i][j]
-                for lock in LOCKS:
-                    for k, v in enumerate(results_raw[i][j][lock]):
-                        w.writerow([wl, t, lock, iters, k, f"{v:.6f}"])
+        w.writerow(CSV_FIELDS)
+        for workload, threads in cells:
+            records = runner.launches_by_cell[(workload, threads)]
+            for lock in LOCKS:
+                for run_idx, record in enumerate(records):
+                    values = record["locks"].get(lock)
+                    if values is None:
+                        continue
+                    w.writerow([workload, threads, lock, pick_iterations(workload), run_idx,
+                                record["launch_index"], values["run_position"], f"{values['time_ms']:.6f}",
+                                f"{values['fairness']:.4f}", f"{record['load_1min']:.2f}"])
 
 
-def write_meta(path: Path, cpu_model: str, pin_cores: list[int],
-               threads_range: list[int], num_cpus: int, env: dict[str, list]) -> None:
+def write_meta(path: Path, cpu_model: str, pin_cores: list[int], threads_range: list[int],
+               num_cpus: int, runner: SweepRunner, cells: list[tuple[int, int]], seed: int) -> None:
     """Sidecar so the plot can disclose the run context (pinned core budget, CPU
     label, measured NOP cost) without re-deriving it from the CSV."""
+    records = [record for cell in cells for record in runner.launches_by_cell[cell]]
+    nop_values = [values["nop_ns"] for record in records for values in record["locks"].values()]
+    slack_values = [values["timer_slack_ns"] for record in records for values in record["locks"].values()]
+    loads = np.asarray([record["load_1min"] for record in records], float)
     meta = {
         "cpu_model": cpu_model,
         "cores_pinned": len(pin_cores) if pin_cores else num_cpus,
         "pin_desc": pin_desc_str(pin_cores),
         "threads_range": threads_range,
         "kernel": platform.release(),
-        "nop_ns": float(np.median(env["nop_ns"])) if env.get("nop_ns") else None,
-        "timer_slack_ns": int(np.median(env["timer_slack_ns"])) if env.get("timer_slack_ns") else None,
+        "nop_ns": float(np.median(nop_values)) if nop_values else None,
+        "timer_slack_ns": int(np.median(slack_values)) if slack_values else None,
+        "seed": seed,
+        "repeats": REPEATS,
+        "repeats_max": REPEATS_MAX,
+        "noisy_cell_cv": NOISY_CELL_CV,
+        "warmup_launches": WARMUP_LAUNCHES,
+        "launches_kept": runner.launch_index,
+        "launches_rejected": runner.failed_launches,
+        "load_1min": {"median": float(np.nanmedian(loads)), "max": float(np.nanmax(loads))}
+        if loads.size and np.isfinite(loads).any() else None,
     }
     path.write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -290,6 +368,9 @@ def main() -> None:
         help="Benchmark executable to run (default: %(default)s, the 'make' release "
              "build for this host; pass bin/<arch>-linux-clang/release/spinlock_test "
              "for a 'make CC=clang' build).")
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Seed for the shuffled schedule and lock order (default: random, recorded in the meta file).")
     cli = parser.parse_args()
 
     if cli.plot_only:
@@ -318,56 +399,25 @@ def main() -> None:
     pin_desc = pin_desc_str(pin_cores)
     core_budget = len(pin_cores) if pin_cores else num_cpus
     threads_range = build_threads_range(core_budget)
+    seed = cli.seed if cli.seed is not None else int(np.random.SeedSequence().entropy % 2**32)
+    runner = SweepRunner(cli.binary, pin_cores, core_budget, np.random.default_rng(seed))
+    cells = [(workload, threads) for workload in WORKLOAD_RANGE for threads in threads_range]
     start_time = time.time()
 
-    n_wl = len(WORKLOAD_RANGE)
-    n_th = len(threads_range)
-
-    results_raw: list[list[dict[str, list[float]]]] = [[{} for _ in range(n_th)] for _ in range(n_wl)]
-    results_iters: list[list[int]] = [[0] * n_th for _ in range(n_wl)]
-    env: dict[str, list] = {}
-
-    total_steps = n_wl * n_th
-    current_step = 0
-    total_raw_cycles = 0
-    report_data: list[dict] = []
-
-    print(f"Executing Benchmarks on {cpu_model}...")
-
-    for i, wl in enumerate(WORKLOAD_RANGE):
-        for j, t in enumerate(threads_range):
-            raw, iters = run_bench(cli.binary, t, wl, pin_cores, t <= core_budget, env)
-            results_raw[i][j] = raw
-            results_iters[i][j] = iters
-
-            # None when a lock was skipped at this point (MCS under
-            # oversubscription), so the report shows it as skipped rather than a
-            # misleading 0.000 ms.
-            med = {lock: (float(np.median(np.asarray(v))) if v else None) for lock, v in raw.items()}
-            mad_v = {lock: (mad(np.asarray(v)) if v else None) for lock, v in raw.items()}
-            ratio = (med["pspin"] / med["ttas"]) if med["ttas"] and med["pspin"] else 0.0
-
-            total_raw_cycles += iters * REPEATS * t
-            report_data.append({
-                "workload": wl, "t": t, "med": med, "mad": mad_v,
-                "ratio": ratio, "iters": iters,
-            })
-
-            current_step += 1
-            pct = (current_step / total_steps) * 100
-            bar = "=" * int(pct // 2)
-            sys.stdout.write(f"\rProgress: [{bar:<50}] {pct:.1f}% ({wl} NOPs, {t} Threads)")
-            sys.stdout.flush()
-
-    sys.stdout.write("\r" + " " * 120 + "\r")
+    print(f"Executing Benchmarks on {cpu_model} (seed {seed})...")
+    runner.warm_up(cells)
+    retry_cells = runner.run_schedule(runner.shuffled([cell for cell in cells for _ in range(REPEATS)]))
+    extra_cells = [cell for cell in cells if runner.cell_spread(cell) > NOISY_CELL_CV
+                   for _ in range(REPEATS_MAX - len(runner.launches_by_cell[cell]))]
+    runner.run_schedule(runner.shuffled(extra_cells + retry_cells))
+    sys.stdout.write("\r" + " " * 140 + "\r")
 
     duration = time.time() - start_time
-    print_report(cpu_model, num_cpus, l1_cache, report_data, threads_range,
-                 total_raw_cycles, duration, pin_desc, env)
+    print_report(cpu_model, num_cpus, l1_cache, runner, cells, threads_range, duration, pin_desc, seed)
     # Write the CSV/meta first, then render from them, so the committed data is
     # the single source of truth and the PNG always matches the tracked CSV.
-    write_csv(CSV_PATH, results_raw, results_iters, threads_range)
-    write_meta(META_PATH, cpu_model, pin_cores, threads_range, num_cpus, env)
+    write_csv(CSV_PATH, runner, cells)
+    write_meta(META_PATH, cpu_model, pin_cores, threads_range, num_cpus, runner, cells, seed)
     render_dashboard(cpu_model)
 
     print(f"[Done] Saved {PNG_PATH}, {CSV_PATH}, and {META_PATH}")
