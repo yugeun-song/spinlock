@@ -29,7 +29,7 @@ SETTLE_SEC: float = 0.3
 # struct fields ~4-16 ns) up to a medium CS where the locks converge. Anything
 # heavier is the wrong tool for a spinlock, so it is intentionally not sampled.
 WORKLOAD_RANGE: list[int] = [ 0, 16, 32, 64, 128, 256, 512, 1024 ]
-BENCHMARK_BIN: Path = Path("./bin/spinlock_test")
+DEFAULT_BENCHMARK_BIN: Path = Path("./bin") / f"{platform.machine()}-linux-gcc" / "release" / "spinlock_test"
 CSV_PATH: Path = Path("bench_results.csv")
 PNG_PATH: Path = Path("bench_result.png")
 META_PATH: Path = Path("bench_meta.json")
@@ -126,7 +126,7 @@ def pick_iterations(workload: int) -> int:
     return 100_000
 
 
-def run_bench(threads: int, workload: int, pin_cores: list[int], run_mcs: bool,
+def run_bench(benchmark_bin: Path, threads: int, workload: int, pin_cores: list[int], run_mcs: bool,
               env: dict[str, list]) -> tuple[dict[str, list[float]], int]:
     iterations = pick_iterations(workload)
     scale = 1_000_000 / iterations
@@ -139,7 +139,7 @@ def run_bench(threads: int, workload: int, pin_cores: list[int], run_mcs: bool,
         if run_idx > 0:
             time.sleep(SETTLE_SEC)
         cmd = [
-            str(BENCHMARK_BIN),
+            str(benchmark_bin),
             "-t", str(threads),
             "-l", str(workload),
             "-i", str(iterations),
@@ -285,6 +285,11 @@ def main() -> None:
         "--no-pin", action="store_true",
         help="Disable automatic P-core pinning (by default the sweep pins to the "
              "highest-frequency core group on heterogeneous P/E or big.LITTLE machines).")
+    parser.add_argument(
+        "--binary", type=Path, default=DEFAULT_BENCHMARK_BIN,
+        help="Benchmark executable to run (default: %(default)s, the 'make' release "
+             "build for this host; pass bin/<arch>-linux-clang/release/spinlock_test "
+             "for a 'make CC=clang' build).")
     cli = parser.parse_args()
 
     if cli.plot_only:
@@ -298,8 +303,8 @@ def main() -> None:
                   f"(no benchmarks run, CSV untouched)")
         return
 
-    if not os.access(BENCHMARK_BIN, os.X_OK):
-        print(f"Error: {BENCHMARK_BIN} not found or not executable. Run 'make' first.",
+    if not os.access(cli.binary, os.X_OK):
+        print(f"Error: {cli.binary} not found or not executable. Run 'make' first.",
               file=sys.stderr)
         sys.exit(1)
 
@@ -331,7 +336,7 @@ def main() -> None:
 
     for i, wl in enumerate(WORKLOAD_RANGE):
         for j, t in enumerate(threads_range):
-            raw, iters = run_bench(t, wl, pin_cores, t <= core_budget, env)
+            raw, iters = run_bench(cli.binary, t, wl, pin_cores, t <= core_budget, env)
             results_raw[i][j] = raw
             results_iters[i][j] = iters
 

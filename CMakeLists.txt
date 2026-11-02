@@ -10,8 +10,6 @@ set(CMAKE_C_EXTENSIONS ON)
 # (where clangd looks first) and refreshes tags / cscope, mirroring 'make all'.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
-
 set(LIB_SRCS spinlock.c)
 set(BENCH_SRCS spinlock_test.c main.c)
 set(CHECK_SRCS spinlock_check.c)
@@ -71,9 +69,17 @@ else()
     list(APPEND COMMON_OPTS -fcf-protection=full)
 endif()
 
+string(REGEX MATCH "^[^-]+" TARGET_ARCHITECTURE "${TARGET_TRIPLE}")
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    set(COMPILER_FAMILY clang)
+else()
+    set(COMPILER_FAMILY gcc)
+endif()
+set(TARGET_BIN_DIR ${CMAKE_SOURCE_DIR}/bin/${TARGET_ARCHITECTURE}-linux-${COMPILER_FAMILY})
+
 set(RELEASE_OPTS -O3 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3)
 
-set(TRACE_OPTS
+set(DEBUG_OPTS
     -O0
     -g3
     -DSPINLOCK_DEBUG
@@ -89,24 +95,31 @@ target_compile_options(spinlock_test PRIVATE ${COMMON_OPTS} ${RELEASE_OPTS})
 target_link_options(spinlock_test PRIVATE ${HARDEN_LINK_OPTS})
 target_link_libraries(spinlock_test PRIVATE Threads::Threads)
 
-add_executable(spinlock_test_trace ${LIB_SRCS} ${BENCH_SRCS})
-target_compile_options(spinlock_test_trace PRIVATE ${COMMON_OPTS} ${TRACE_OPTS})
-target_link_options(spinlock_test_trace PRIVATE -rdynamic ${HARDEN_LINK_OPTS})
-target_link_libraries(spinlock_test_trace PRIVATE Threads::Threads)
+add_executable(spinlock_test_debug ${LIB_SRCS} ${BENCH_SRCS})
+target_compile_options(spinlock_test_debug PRIVATE ${COMMON_OPTS} ${DEBUG_OPTS})
+target_link_options(spinlock_test_debug PRIVATE -rdynamic ${HARDEN_LINK_OPTS})
+target_link_libraries(spinlock_test_debug PRIVATE Threads::Threads)
 
 add_executable(spinlock_check ${LIB_SRCS} ${CHECK_SRCS})
 target_compile_options(spinlock_check PRIVATE ${COMMON_OPTS} ${RELEASE_OPTS})
 target_link_options(spinlock_check PRIVATE ${HARDEN_LINK_OPTS})
 target_link_libraries(spinlock_check PRIVATE Threads::Threads)
 
-add_executable(spinlock_check_trace ${LIB_SRCS} ${CHECK_SRCS})
-target_compile_options(spinlock_check_trace PRIVATE ${COMMON_OPTS} ${TRACE_OPTS})
-target_link_options(spinlock_check_trace PRIVATE -rdynamic ${HARDEN_LINK_OPTS})
-target_link_libraries(spinlock_check_trace PRIVATE Threads::Threads)
+add_executable(spinlock_check_debug ${LIB_SRCS} ${CHECK_SRCS})
+target_compile_options(spinlock_check_debug PRIVATE ${COMMON_OPTS} ${DEBUG_OPTS})
+target_link_options(spinlock_check_debug PRIVATE -rdynamic ${HARDEN_LINK_OPTS})
+target_link_libraries(spinlock_check_debug PRIVATE Threads::Threads)
+
+set_target_properties(spinlock_test spinlock_check PROPERTIES
+                      RUNTIME_OUTPUT_DIRECTORY ${TARGET_BIN_DIR}/release)
+set_target_properties(spinlock_test_debug spinlock_check_debug PROPERTIES
+                      RUNTIME_OUTPUT_DIRECTORY ${TARGET_BIN_DIR}/debug)
+set_target_properties(spinlock_test_debug PROPERTIES OUTPUT_NAME spinlock_test)
+set_target_properties(spinlock_check_debug PROPERTIES OUTPUT_NAME spinlock_check)
 
 enable_testing()
 add_test(NAME spinlock_check COMMAND spinlock_check)
-add_test(NAME spinlock_check_trace COMMAND spinlock_check_trace)
+add_test(NAME spinlock_check_debug COMMAND spinlock_check_debug)
 
 # Source-navigation databases in the source root, run with 'cmake --build build
 # --target index'. Tools that are absent are skipped, never fatal.

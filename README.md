@@ -11,7 +11,7 @@ This project provides custom spinlocks using architecture-specific inline assemb
 - **Lock disciplines** (all on x86-64 and aarch64; a NULL lock pointer faults, it is not silently ignored):
   - **`spin_lock_ttas`** / **`spin_unlock_ttas`** — test-and-test-and-set with exponential backoff between failed CAS attempts (`-m`..`-M` pause iterations, default 4..16,000). Pure spin: a waiter never leaves the CPU. An uncontended acquire is a single CAS.
   - **`spin_lock_ttas_park`** — the same loop on the same `spinlock_ttas_t` (same init, same unlock), but once the backoff cap is reached every further failed CAS calls `nanosleep(1 us)`. Linux rounds that sleep up by the thread's timer slack (`/proc/self/timerslack_ns`, 50 us by default; real-time scheduling classes get zero slack), so a parked waiter is away for ~50 us while the holder re-acquires unopposed: throughput over fairness, and a policy the benchmark's `-S` flag makes visible.
-  - **`spin_lock_mcs`** / **`spin_unlock_mcs`** — an MCS queue lock (tail swap via `xchg` / LSE `swpal` / LL-SC, hand-off via `stlr` / release store). Each waiter spins on its own cache line, so it is FIFO-fair and storm-free, at the cost of a cache-line transfer per hand-off; it convoys under oversubscription (a preempted successor stalls the whole queue). These single-argument wrappers use a per-thread node defined once in `spinlock.c` (`spin_mcs_thread_local_node`), so a lock taken in one translation unit may be released in another; they still must not nest, because one node can sit in only one queue at a time (the trace build aborts on a nested wrapper call). **`spin_lock_mcs_node(lock, node)`** / **`spin_unlock_mcs_node(lock, node)`** take an explicit, cache-line-aligned `mcs_node_t` and have neither limit:
+  - **`spin_lock_mcs`** / **`spin_unlock_mcs`** — an MCS queue lock (tail swap via `xchg` / LSE `swpal` / LL-SC, hand-off via `stlr` / release store). Each waiter spins on its own cache line, so it is FIFO-fair and storm-free, at the cost of a cache-line transfer per hand-off; it convoys under oversubscription (a preempted successor stalls the whole queue). These single-argument wrappers use a per-thread node defined once in `spinlock.c` (`spin_mcs_thread_local_node`), so a lock taken in one translation unit may be released in another; they still must not nest, because one node can sit in only one queue at a time (the debug build aborts on a nested wrapper call). **`spin_lock_mcs_node(lock, node)`** / **`spin_unlock_mcs_node(lock, node)`** take an explicit, cache-line-aligned `mcs_node_t` and have neither limit:
     ```c
     spinlock_mcs_t lock;            /* spin_init_mcs(&lock) once */
     mcs_node_t node;                /* one per thread per held lock */
@@ -21,35 +21,41 @@ This project provides custom spinlocks using architecture-specific inline assemb
     ```
 - **OS**: Linux
 - **Compilers**: GCC or Clang (Standard: `gnu99`)
-- **Build Systems**: Make and CMake (≥ 3.16)
-- **Build Modes** (both carry the same warning set, `-Wall -Wextra -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings -Wvla -Wundef -Wnull-dereference -Wimplicit-fallthrough -Wdouble-promotion -Wconversion -Wsign-conversion`, and the same hardening, `-fstack-protector-strong -fstack-clash-protection -fcf-protection=full` (`-mbranch-protection=standard` on aarch64) `-fPIE -pie -Wl,-z,relro,-z,now,-z,noexecstack`; the code builds warning-free under both compilers):
+- **Build Systems**: GNU Make (≥ 4.3) and CMake (≥ 3.16)
+- **Build Modes** (all three carry the same warning set, `-Wall -Wextra -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings -Wvla -Wundef -Wnull-dereference -Wimplicit-fallthrough -Wdouble-promotion -Wconversion -Wsign-conversion`, and the same compile-time hardening, `-fstack-protector-strong -fstack-clash-protection -fcf-protection=full` (`-mbranch-protection=standard` on aarch64) `-fPIE`; release and debug also link with `-pie -Wl,-z,relro,-z,now,-z,noexecstack`; the code builds warning-free under both compilers):
   - **Release**: `-O3 -D_FORTIFY_SOURCE=3 -fno-omit-frame-pointer -fasynchronous-unwind-tables` — optimized for benchmarking with frame pointers and unwind tables preserved for `perf` and flame graphs. The hardening flags touch no instruction in the lock hot paths; an A/B run of old flags against new flags on this host stayed inside run-to-run noise.
-  - **Trace/Debug**: `-O0 -g3 -DSPINLOCK_DEBUG -fno-inline -fno-inline-functions -fno-optimize-sibling-calls -rdynamic` — every `static inline` helper resolves to a real call frame so `uftrace`, `gdb`, `strace`, and `perf` can step into each function. `SPINLOCK_DEBUG` compiles in misuse checks that abort at the offending call: `spin_unlock_ttas` on a lock that is not held, `spin_unlock_mcs_node` on an empty queue, and a nested `spin_lock_mcs` wrapper call. Each check is a plain load on a path the caller already owns and never touches the lock protocol.
+  - **Debug**: `-O0 -g3 -DSPINLOCK_DEBUG -fno-inline -fno-inline-functions -fno-optimize-sibling-calls -rdynamic` — every `static inline` helper resolves to a real call frame so `uftrace`, `gdb`, `strace`, and `perf` can step into each function. `SPINLOCK_DEBUG` compiles in misuse checks that abort at the offending call: `spin_unlock_ttas` on a lock that is not held, `spin_unlock_mcs_node` on an empty queue, and a nested `spin_lock_mcs` wrapper call. Each check is a plain load on a path the caller already owns and never touches the lock protocol.
+  - **Sanitize**: `-O1 -g -DSPINLOCK_DEBUG -ftls-model=local-exec -fsanitize=address,undefined -fno-sanitize-recover=all` — the correctness suite only, under AddressSanitizer and UndefinedBehaviorSanitizer. `make` builds it whenever the toolchain can link the sanitizer runtimes, and `make sanitize` runs it. `-ftls-model=local-exec` sidesteps a GCC 16 `-fsanitize=null` false positive described under [Validators](#validators).
 - **Code Style**: LLVM-based `.clang-format` — right-aligned pointers, Allman function braces, K&R control flow, 100-column soft limit. Each C file is laid out top to bottom as preprocessor directives, type definitions (`typedef`, `struct`, `union`, `enum`), global and static variables, then functions. A table initialised with function addresses (`g_contenders` in `spinlock_test.c`) sits right after the functions it points to instead of forward-declaring them.
 
 ## Build Instructions
 
-Either build system produces the same artifacts under `bin/`. Use GCC or Clang interchangeably.
+Both build systems write every program to `bin/<arch>-linux-<compiler>/<config>/`, where `<arch>` comes from the compiler's own target triple (`$(CC) -dumpmachine`) and `<compiler>` is `gcc` or `clang`. GCC, Clang and cross builds therefore sit side by side instead of overwriting each other. GCC is the default compiler.
 
 ### Make
 
 ```bash
-make clean
-make all              # release + trace benchmark, both check binaries, and the
-                      # editor indexes (compile_commands.json, tags, cscope.out)
-# or build a single target:
-make release          # ./bin/spinlock_test
-make trace            # ./bin/spinlock_test_trace
-make check-binaries   # ./bin/spinlock_check and ./bin/spinlock_check_trace
+make                  # build everything at once on every core: release + debug benchmark,
+                      # the three check binaries and the editor indexes
+                      # (compile_commands.json, tags, cscope.out)
+make -j4              # cap the parallel jobs (same as make JOBS=4); -j1 builds serially
+make CC=clang         # the same set built with Clang, into bin/x86_64-linux-clang/
+# or build a single configuration:
+make release          # bin/<arch>-linux-<compiler>/release/{spinlock_test,spinlock_check}
+make debug            # bin/<arch>-linux-<compiler>/debug/{spinlock_test,spinlock_check}
 make index            # compile_commands.json + tags + cscope.out only
 
-make check            # run the correctness suite on both check binaries
-make sanitize         # rebuild the suite with ASan + UBSan and run it
+make check            # run the correctness suite on the release and debug check binaries
+make sanitize         # build the suite with ASan + UBSan and run it
 make lsp-check        # let clangd parse every file and print its diagnostics
 make tidy             # clang-tidy over every translation unit
+make clean            # remove bin/ (and a CMake build/); keep indexes and tool output
+make distclean        # clean + indexes, caches and every debugger / profiler artifact
 ```
 
-Override the compiler with `make CC=clang all`.
+Without `-j`, the Makefile runs `nproc` jobs (GNU Make 4.3 or newer honours a `-j` set from inside the Makefile); an explicit `-jN` or `JOBS=N` wins. Several goals on one command line run one after another, in the order given, each still in parallel, so `make clean all` cannot race the clean against the build. `make all` builds and never runs the tests: the stress tests saturate every core, and three check binaries started together did not finish within 120 s, against 2–3 s each when run alone.
+
+A toolchain that cannot link `-fsanitize=address,undefined` (for example `aarch64-linux-gnu-gcc` without a cross libasan) skips the sanitize binary with a notice. Each binary records the command that built it, compiler version included, in a hidden `.<program>.cmd` file beside it. When `CC`, `ARCH_CFLAGS` or any flag changes, the next `make` rebuilds exactly the binaries whose command changed, with no `make clean` in between.
 
 ### Editor integration: clangd, ctags, cscope
 
@@ -75,13 +81,15 @@ CC=clang cmake -S . -B build
 cmake --build build -j
 ```
 
+CMake writes the release and debug programs to the same `bin/<arch>-linux-<compiler>/{release,debug}/` folders as Make. The sanitize build is Makefile-only.
+
 ### aarch64
 
 On an aarch64 host, `make` and `cmake` work unchanged. To cross-build from an x86 host, just point the build at the cross compiler: the Makefile reads the target triple from `$(CC) -dumpmachine`, so an aarch64 compiler automatically gets the v8.0 baseline `-march=armv8-a` (the portable `ldaxr`/`stlxr` LL/SC atomics). Run the result under QEMU:
 
 ```bash
 make CC=aarch64-linux-gnu-gcc
-qemu-aarch64 -L /usr/aarch64-linux-gnu ./bin/spinlock_test -t 4 -l 0 -i 100000
+qemu-aarch64 -L /usr/aarch64-linux-gnu ./bin/aarch64-linux-gcc/release/spinlock_test -t 4 -l 0 -i 100000
 ```
 
 To emit the single-instruction LSE atomics (`casa` acquire, `swpal`/`casl` for the MCS queue) instead of the LL/SC fallback, target an LSE-capable architecture via `ARCH_CFLAGS` (Make) or `-DARCH_LSE=ON` (CMake):
@@ -90,6 +98,8 @@ To emit the single-instruction LSE atomics (`casa` acquire, `swpal`/`casl` for t
 make CC=aarch64-linux-gnu-gcc ARCH_CFLAGS='-march=armv8.1-a'   # or -mcpu=neoverse-n1
 cmake -S . -B build -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DARCH_LSE=ON && cmake --build build -j
 ```
+
+Both variants land in `bin/aarch64-linux-gcc/`. Switching between them rebuilds the binaries, because each one records the `ARCH_CFLAGS` it was built with.
 
 A fully static binary (no sysroot needed to run under QEMU) can be built directly:
 
@@ -100,11 +110,18 @@ aarch64-linux-gnu-gcc -O3 -std=gnu99 -Wall -Wextra -static -march=armv8.1-a \
 
 Confirm which path was compiled in by disassembling: `casa`/`swpal` means the LSE path, `ldaxr`/`stlxr` means the LL/SC fallback.
 
-### Artifacts (in `bin/`)
-- `./bin/spinlock_test` — **release build**, used for benchmarking and the headline numbers below.
-- `./bin/spinlock_test_trace` — **trace/debug build**, used with `uftrace`, `gdb`, `strace`, `perf`, and other analysis tools. Inlining is fully suppressed and `-rdynamic` exposes all symbols, so every helper appears as a real call frame.
-- `./bin/spinlock_check` / `./bin/spinlock_check_trace` — the **correctness suite** (see [Stability & Sanity Checks](#stability--sanity-checks)) built with the release and the trace flags; `make check` runs both. `SPINLOCK_CHECK_ITERATIONS=<n>` shrinks the contended passes, for example under valgrind.
-- `./bin/spinlock_check_sanitize` — the suite under AddressSanitizer + UndefinedBehaviorSanitizer, built and run by `make sanitize`.
+### Artifacts (in `bin/<arch>-linux-<compiler>/`)
+
+| Folder | Programs | Built by |
+| :--- | :--- | :--- |
+| `release/` | `spinlock_test`, `spinlock_check` | `make`, `make release` |
+| `debug/` | `spinlock_test`, `spinlock_check` | `make`, `make debug` |
+| `sanitize/` | `spinlock_check` | `make`, `make sanitize` |
+
+- `release/spinlock_test` — **release build**, used for benchmarking and the headline numbers below.
+- `debug/spinlock_test` — **debug build**, used with `uftrace`, `gdb`, `strace`, `perf`, and other analysis tools. Inlining is fully suppressed and `-rdynamic` exposes all symbols, so every helper appears as a real call frame.
+- `release/spinlock_check` / `debug/spinlock_check` — the **correctness suite** (see [Stability & Sanity Checks](#stability--sanity-checks)) built with the release and the debug flags; `make check` runs both. `SPINLOCK_CHECK_ITERATIONS=<n>` shrinks the contended passes, for example under valgrind.
+- `sanitize/spinlock_check` — the suite under AddressSanitizer + UndefinedBehaviorSanitizer, run by `make sanitize`.
 
 ### Source layout
 - `spinlock.h` — the three lock disciplines, header-only apart from the definitions below.
@@ -114,10 +131,10 @@ Confirm which path was compiled in by disassembling: `casa`/`swpal` means the LS
 
 ## Usage & Options
 
-Run the binary directly from the command line. If no arguments are provided, default values are used.
+Run the binary directly from the command line. If no arguments are provided, default values are used. The examples use the release build of the default toolchain on x86-64; substitute your own `<arch>-linux-<compiler>` folder.
 
 ```bash
-./bin/spinlock_test [options]
+./bin/x86_64-linux-gcc/release/spinlock_test [options]
 ```
 
 ### Command-Line Arguments
@@ -141,77 +158,79 @@ The header also prints the measured cost of one workload loop iteration (`NOP Co
 #### 1. Default Run
 Use standard settings (optimized for general testing).
 ```bash
-./bin/spinlock_test
+./bin/x86_64-linux-gcc/release/spinlock_test
 ```
 
 #### 2. High Contention Test
 Simulate heavy contention with 8 threads and a very short critical section.
 ```bash
-./bin/spinlock_test -t 8 -l 0
+./bin/x86_64-linux-gcc/release/spinlock_test -t 8 -l 0
 ```
 
 #### 3. Long Critical Section Test
 Simulate a scenario where the lock is held for a longer duration (10,000 nops), which narrows the gap between the spinlocks as raw acquire cost is amortized over the critical section.
 ```bash
-./bin/spinlock_test -l 10000
+./bin/x86_64-linux-gcc/release/spinlock_test -l 10000
 ```
 
 #### 4. Tuning Backoff Algorithm
 Adjust the exponential backoff parameters to optimize for specific hardware (e.g., Intel Core Ultra or aarch64 Cortex/Neoverse cores).
 ```bash
-./bin/spinlock_test -m 16 -M 4096
+./bin/x86_64-linux-gcc/release/spinlock_test -m 16 -M 4096
 ```
 
 #### 5. Controlled Run (pinning + contender selection)
 Pin all workers to the four P-cores for low-variance, deterministic placement, and compare only the TTAS lock against POSIX (dropping the MCS queue lock):
 ```bash
-./bin/spinlock_test -t 4 -C 0-3 -K ttas,pspin
+./bin/x86_64-linux-gcc/release/spinlock_test -t 4 -C 0-3 -K ttas,pspin
 ```
 
 #### 6. Timer Slack
 Run the parking TTAS and the POSIX mutex with a 1 ns timer slack, so `nanosleep(1 us)` returns after ~2 us instead of ~50 us:
 ```bash
-./bin/spinlock_test -t 4 -C 0-3 -l 0 -S 1 -K ttas_park,pmutex
+./bin/x86_64-linux-gcc/release/spinlock_test -t 4 -C 0-3 -l 0 -S 1 -K ttas_park,pmutex
 ```
 
-## Profiling & Tracing the Trace Build
+## Profiling & Tracing the Debug Build
 
-The trace build (`./bin/spinlock_test_trace`) suppresses inlining and ships full debug info, so every `static inline` helper resolves to a real call frame. Common workflows:
+The debug build (`./bin/x86_64-linux-gcc/debug/spinlock_test`) suppresses inlining and ships full debug info, so every `static inline` helper resolves to a real call frame. Common workflows:
 
 ```bash
 # Function-level user-space trace (uftrace)
-uftrace ./bin/spinlock_test_trace -t 8 -l 0 -i 100000
+uftrace ./bin/x86_64-linux-gcc/debug/spinlock_test -t 8 -l 0 -i 100000
 
 # Hot-path sampling with perf (DWARF call graph)
-perf record -F 999 --call-graph dwarf ./bin/spinlock_test_trace -t 8 -l 0 -i 100000
+perf record -F 999 --call-graph dwarf ./bin/x86_64-linux-gcc/debug/spinlock_test -t 8 -l 0 -i 100000
 perf report
 
 # Single-step into spin_lock_ttas under gdb
-gdb -ex 'b spin_lock_ttas' --args ./bin/spinlock_test_trace -t 2 -l 0 -i 1000
+gdb -ex 'b spin_lock_ttas' --args ./bin/x86_64-linux-gcc/debug/spinlock_test -t 2 -l 0 -i 1000
 
 # Syscall summary
-strace -c ./bin/spinlock_test_trace -t 4 -l 0 -i 100000
+strace -c ./bin/x86_64-linux-gcc/debug/spinlock_test -t 4 -l 0 -i 100000
 
 # Valgrind: memory errors, thread races, cache profile
-valgrind --tool=memcheck --leak-check=full ./bin/spinlock_test_trace -t 2 -l 0 -i 1000
-valgrind --tool=helgrind                    ./bin/spinlock_test_trace -t 4 -l 0 -i 1000
-valgrind --tool=drd                         ./bin/spinlock_test_trace -t 4 -l 0 -i 1000
-valgrind --tool=cachegrind                  ./bin/spinlock_test_trace -t 2 -l 500 -i 10000
+valgrind --tool=memcheck --leak-check=full ./bin/x86_64-linux-gcc/debug/spinlock_test -t 2 -l 0 -i 1000
+valgrind --tool=helgrind                    ./bin/x86_64-linux-gcc/debug/spinlock_test -t 4 -l 0 -i 1000
+valgrind --tool=drd                         ./bin/x86_64-linux-gcc/debug/spinlock_test -t 4 -l 0 -i 1000
+valgrind --tool=cachegrind                  ./bin/x86_64-linux-gcc/debug/spinlock_test -t 2 -l 500 -i 10000
 ```
 
 All commands above run unchanged on an aarch64 host. To drive a cross-built aarch64 binary from an x86 host, wrap it in QEMU's gdbstub and attach the cross debugger:
 
 ```bash
-qemu-aarch64 -g 1234 ./spinlock_test_arm64_trace -t 2 -l 0 -i 1000 &
-aarch64-linux-gnu-gdb -ex 'target remote :1234' -ex 'b spin_lock_ttas' ./spinlock_test_arm64_trace
+make CC=aarch64-linux-gnu-gcc debug
+qemu-aarch64 -L /usr/aarch64-linux-gnu -g 1234 ./bin/aarch64-linux-gcc/debug/spinlock_test -t 2 -l 0 -i 1000 &
+aarch64-linux-gnu-gdb -ex 'set sysroot /usr/aarch64-linux-gnu' -ex 'target remote :1234' \
+    -ex 'b spin_lock_ttas' ./bin/aarch64-linux-gcc/debug/spinlock_test
 ```
 
 Use `make distclean` to scrub every debugger / profiler / tracer artifact (cores, valgrind dumps, perf.data, uftrace.data, `__pycache__`, CMake residue, …) on top of `make clean`'s build-only sweep.
 
-The release build (`./bin/spinlock_test`) is what `test_bench.py` exercises and what produces the headline numbers below.
+The release build (`./bin/<arch>-linux-gcc/release/spinlock_test`, or whatever `--binary` names) is what `test_bench.py` exercises and what produces the headline numbers below.
 
 ## Benchmark Results
-*Test environment: Intel Core Ultra 5 226V (4 P-cores @ 4.5 GHz + 4 E-cores @ 3.5 GHz), Arch Linux, kernel `7.2.6-arch2-1`, GCC 16.2.1 release build (`-O3`), default timer slack 50,000 ns (`/proc/self/timerslack_ns`). Workers pinned to the four P-cores (`-C 0-3`). Every number below is the median of 5 runs of `./bin/spinlock_test`, 1,000,000 iterations per thread unless stated; `ns/acq` is elapsed time divided by the total number of acquisitions. On this core a `pause` costs ≈ 10.4 ns, so the default backoff cap `-M 16000` is a ≈ 167 us spin between two CAS attempts, and the measured NOP cost is 0.111 ns.*
+*Test environment: Intel Core Ultra 5 226V (4 P-cores @ 4.5 GHz + 4 E-cores @ 3.5 GHz), Arch Linux, kernel `7.2.6-arch2-1`, GCC 16.2.1 release build (`-O3`), default timer slack 50,000 ns (`/proc/self/timerslack_ns`). Workers pinned to the four P-cores (`-C 0-3`). Every number below is the median of 5 runs of `./bin/x86_64-linux-gcc/release/spinlock_test`, 1,000,000 iterations per thread unless stated; `ns/acq` is elapsed time divided by the total number of acquisitions. On this core a `pause` costs ≈ 10.4 ns, so the default backoff cap `-M 16000` is a ≈ 167 us spin between two CAS attempts, and the measured NOP cost is 0.111 ns.*
 
 **What the harness rewards.** Each thread performs a fixed number of acquisitions and the elapsed time is the wall time until the *last* thread finishes; there is no fairness term. On the same four cores every lock pays the same physical cost for a contended hand-off: the lock word (or the MCS flag) has to move between cores, ≈ 90–100 ns per acquisition here, which is exactly where the POSIX spinlock, the POSIX mutex and MCS all land. Two locks that hand the lock over on every acquisition therefore cannot differ by 5–11x on this machine. A lock that finishes several times sooner is doing different work: its waiters stay away from the lock (a 167 us backoff spin, a 50 us park) while one thread re-acquires uncontended at ≈ 9 ns, and the fixed-iteration metric rewards that. The fairness column exposes it — `min/max` is the ratio of the earliest to the latest per-thread completion time; `1.00` means the lock was handed around evenly, `0.4–0.6` means one thread ran through while the others waited.
 
@@ -289,7 +308,7 @@ The critical section dominates: 4 × 472 ms = 1,889 ms of serialised work is the
 
 Measurement and visualization are split into two scripts, so the plot can be iterated on without touching benchmark code:
 
-- **`test_bench.py`** runs the sweep — thread counts × workload intensities × the five contenders, aggregated as **Median ± MAD** over **7 runs (+ 1 discarded warmup)** — and writes the raw CSV of every measurement (`bench_results.csv`), a run-context sidecar (`bench_meta.json`, including the measured NOP cost and timer slack read from the harness header), and a textual report. To control variance it auto-detects the highest-frequency core group (the P-cores on a heterogeneous P/E or big.LITTLE machine) and pins every worker to it via `-C`, sizing the thread sweep to that pinned set; `--no-pin` disables it. When the sweep finishes it hands off to the visualizer.
+- **`test_bench.py`** runs the sweep — thread counts × workload intensities × the five contenders, aggregated as **Median ± MAD** over **7 runs (+ 1 discarded warmup)** — and writes the raw CSV of every measurement (`bench_results.csv`), a run-context sidecar (`bench_meta.json`, including the measured NOP cost and timer slack read from the harness header), and a textual report. To control variance it auto-detects the highest-frequency core group (the P-cores on a heterogeneous P/E or big.LITTLE machine) and pins every worker to it via `-C`, sizing the thread sweep to that pinned set; `--no-pin` disables it. It runs the release build of the default toolchain for this host, `bin/<arch>-linux-gcc/release/spinlock_test`; `--binary` picks another build, for example `bin/x86_64-linux-clang/release/spinlock_test` after `make CC=clang`. When the sweep finishes it hands off to the visualizer.
 - **`plot.py`** renders the dashboard (`bench_result.png`) from the committed CSV alone. Run `python3 plot.py` to redraw after editing the plot, or `python3 test_bench.py --plot-only` for the same thing — both read the CSV and never modify it.
 
 The dashboard is a dark board (Binance-style design-system palette):
@@ -319,13 +338,13 @@ The full raw measurement table (8 workloads × 4 thread counts × 5 locks — Cu
 - `ttas` and `ttas_park` under contention, the latter with the backoff cap forced to 8 so every waiter really parks;
 - the MCS single-argument wrapper, the explicit-node API with a heap node per thread, and two MCS locks nested per thread through two nodes;
 - uncontended state transitions of every API (`is_locked` toggles, `queue_tail` points at the holder's node and returns to `NULL`, a failed CAS leaves the word untouched), the cache-line size and alignment of every type including the thread-local node, that the wrapper node is really per thread (a second thread queues behind it instead of sharing it), and that the backoff loop survives caps of `1`, `INT_MAX`, and a minimum above the maximum;
-- in the trace build, that each `SPINLOCK_DEBUG` misuse check aborts the process (each case runs in a forked child and must end with `SIGABRT`).
+- in the debug build, that each `SPINLOCK_DEBUG` misuse check aborts the process (each case runs in a forked child and must end with `SIGABRT`).
 
 Both check binaries pass on x86-64 with GCC and Clang, and both pass under `qemu-aarch64` for the v8.0 LL/SC build (`-march=armv8-a`) and the v8.1 LSE build (`-march=armv8.1-a`).
 
 ### Validators
 
-The trace build (`./bin/spinlock_test_trace`) and the check suite were exercised under several validators (all five contenders selected):
+The debug build (`./bin/x86_64-linux-gcc/debug/spinlock_test`) and the check suite were exercised under several validators (all five contenders selected):
 
 | Tool | Scope | Result |
 | :--- | :--- | :--- |
@@ -338,6 +357,6 @@ The trace build (`./bin/spinlock_test_trace`) and the check suite were exercised
 
 One tool finding was itself a false positive and is documented rather than worked around in the code: GCC 16's `-fsanitize=null` reports `member access within null pointer` for the extern thread-local MCS node when the code is compiled at `-O1` with the initial-exec or dynamic TLS models. The address is non-null at run time (checked in gdb: the handler is called with a literal `0` while `&spin_mcs_thread_local_node` reads a valid address), the report vanishes at `-O0`, under Clang, and with `-ftls-model=local-exec`. `make sanitize` therefore builds with `-ftls-model=local-exec`, which is the correct model for an executable that defines all of its own thread-locals.
 
-The helgrind / TSan warnings are **expected**: both detectors only recognise synchronization expressed through `pthread` primitives or C11 `<stdatomic.h>`, and our spinlocks acquire through raw atomic instructions (TTAS: `lock cmpxchgl` on x86-64; an `ldaxr`/`stlxr` load-acquire CAS — or a single `casa` load-acquire CAS under v8.1 LSE — with an `stlr` release on aarch64. MCS: `xchg`/`lock cmpxchg` on x86-64; `swpal`/`casl` under LSE or `ldaxr`/`stlxr` LL/SC, with `ldar`/`stlr` hand-off, on aarch64) over `volatile`-qualified words, which they cannot pattern-match; every flagged stack is in `ttas_acquire`, `spin_unlock_ttas` or the MCS task, none in the `pspin`/`pmutex` contenders. `drd` ignores them because of how it tracks vector clocks per memory access. None of the tools reported a memory error and every run produced the expected atomic count. A NULL lock pointer is not checked: `spin_lock_ttas(NULL)` and the other four entry points fault with `SIGSEGV`. The trace build's `SPINLOCK_DEBUG` checks catch the other misuse class, releasing a lock that is not held and nesting the MCS wrapper, by aborting at the call site.
+The helgrind / TSan warnings are **expected**: both detectors only recognise synchronization expressed through `pthread` primitives or C11 `<stdatomic.h>`, and our spinlocks acquire through raw atomic instructions (TTAS: `lock cmpxchgl` on x86-64; an `ldaxr`/`stlxr` load-acquire CAS — or a single `casa` load-acquire CAS under v8.1 LSE — with an `stlr` release on aarch64. MCS: `xchg`/`lock cmpxchg` on x86-64; `swpal`/`casl` under LSE or `ldaxr`/`stlxr` LL/SC, with `ldar`/`stlr` hand-off, on aarch64) over `volatile`-qualified words, which they cannot pattern-match; every flagged stack is in `ttas_acquire`, `spin_unlock_ttas` or the MCS task, none in the `pspin`/`pmutex` contenders. `drd` ignores them because of how it tracks vector clocks per memory access. None of the tools reported a memory error and every run produced the expected atomic count. A NULL lock pointer is not checked: `spin_lock_ttas(NULL)` and the other four entry points fault with `SIGSEGV`. The debug build's `SPINLOCK_DEBUG` checks catch the other misuse class, releasing a lock that is not held and nesting the MCS wrapper, by aborting at the call site.
 
 The results above are from the x86-64 build. On aarch64, correctness is established by construction: for **all three** lock disciplines every acquire/release path is confirmed by per-function disassembly (`ttas_cas_acquire`: `casa` under `-march=armv8.1-a`, `ldaxr`/`stlxr`/`clrex` on baseline `-march=armv8-a`; `mcs_swap_tail`: `swpal` / `ldaxr`+`stlxr`; `mcs_cas_tail_null`: `casl` / `ldxr`+`stlxr`; releases via `stlr`, acquires via `ldar`), both builds compile warning-free at `-O3` and `-O0`, and the atomic-count oracle passes under QEMU (`qemu-aarch64`) for both builds and all five contenders at 4 and 8 threads, with and without `-S`. Note that QEMU-user does not reproduce weak-memory reordering, so the guarantee rests on the architecturally-correct acquire/release barriers rather than on the emulator.
