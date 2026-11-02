@@ -24,17 +24,18 @@
  */
 #define CONTENDER_KEY_LIST "ttas,ttas_park,pspin,pmutex,mcs"
 #define MEASUREMENT_CSV_HEADER                                                                     \
-    "lock,run_position,threads,iterations,workload_nops,nop_ns,timer_slack_ns,elapsed_ms,shared_"  \
-    "count,"                                                                                       \
-    "expected_count,count_ok,earliest_done_ms,voluntary_switches,involuntary_switches"
+    "lock,run_position,threads,iterations,workload_nops,nop_ns,timer_slack_ns,elapsed_ms,"         \
+    "shared_count,expected_count,count_ok,earliest_done_ms,voluntary_switches,"                    \
+    "involuntary_switches,placement_page"
+#define CACHE_LINE_PAIR_SIZE (2 * CACHE_LINE_SIZE)
 
 /*
  * Cache-line-isolated wrapper for the POSIX spinlock. pthread_spinlock_t is a
  * bare word, whereas our custom spinlock_ttas_t is padded to its own cache line. To
  * compare the two locks fairly, the POSIX lock must get the same isolation:
- * without this padding it could share a cache line with the contended counter
- * on the benchmark stack, so the lock holder's counter write would invalidate
- * the waiters' cached copy of the lock word on every critical section — extra
+ * without this padding it could share a cache line with the contended counter,
+ * so the lock holder's counter write would invalidate the waiters' cached copy
+ * of the lock word on every critical section — extra
  * coherence traffic that has nothing to do with the lock itself and would
  * unfairly penalise the POSIX lock. Mirrors the spinlock_ttas_t layout exactly.
  */
@@ -47,6 +48,19 @@ typedef struct {
     pthread_mutex_t lock;
     char cache_line_padding[CACHE_LINE_SIZE - sizeof(pthread_mutex_t)];
 } __attribute__((aligned(CACHE_LINE_SIZE))) isolated_posix_mutex_t;
+
+typedef struct {
+    long long value;
+    char cache_line_padding[CACHE_LINE_SIZE - sizeof(long long)];
+} __attribute__((aligned(CACHE_LINE_SIZE))) isolated_shared_counter_t;
+
+struct contended_objects {
+    spinlock_ttas_t ttas_lock;
+    spinlock_mcs_t mcs_lock;
+    isolated_posix_spinlock_t isolated_posix_spinlock;
+    isolated_posix_mutex_t isolated_posix_mutex;
+    isolated_shared_counter_t shared_counter;
+} __attribute__((aligned(CACHE_LINE_PAIR_SIZE)));
 
 struct worker_context {
     long long *shared_counter;
@@ -114,6 +128,12 @@ static int g_contender_run_count = BENCH_LOCK_COUNT;
  */
 static int *g_conf_pinned_cpu_ids = NULL;
 static int g_conf_pinned_cpu_count = 0;
+
+static int *g_conf_placement_pages = NULL;
+static int g_conf_placement_run_count = 0;
+static unsigned char *g_placement_pool = NULL;
+static size_t g_placement_page_stride = 0;
+static size_t g_placement_pool_size = 0;
 
 static double elapsed_milliseconds_between(const struct timespec *begin_time, const struct timespec *end_time)
 {
@@ -355,85 +375,124 @@ static void parse_contender_list(const char *argument_text)
     }
 }
 
-/*
- * Parse a CPU list ("0-3", "0,2,4", "0-1,4-5") into g_conf_pinned_cpu_ids and
- * g_conf_pinned_cpu_count. Rejects malformed input the same way the numeric
- * options do, so a typo fails loudly instead of silently pinning to the wrong
- * set. A repeated -C replaces the earlier list.
- */
-static void parse_cpu_list(const char *argument_text)
+static long configured_cpu_id_limit(void)
 {
-    const char *cursor = argument_text;
-    char *parse_end;
-    int *grown_cpu_ids;
-    long cpu_id_limit;
-    long range_first_cpu;
-    long range_last_cpu;
-    long cpu_id;
-    size_t cpu_ids_capacity = 8;
+    long cpu_id_limit = sysconf(_SC_NPROCESSORS_CONF);
 
-    cpu_id_limit = sysconf(_SC_NPROCESSORS_CONF);
     if (cpu_id_limit <= 0 || cpu_id_limit > CPU_SETSIZE) {
         /* Clamp to the fixed cpu_set_t width so CPU_SET can never index past it. */
         cpu_id_limit = CPU_SETSIZE;
     }
+    return cpu_id_limit;
+}
 
-    free(g_conf_pinned_cpu_ids);
-    g_conf_pinned_cpu_ids = malloc(cpu_ids_capacity * sizeof(*g_conf_pinned_cpu_ids));
-    if (!g_conf_pinned_cpu_ids) {
+/*
+ * Parse an index list ("0-3", "0,2,4", "0-1,4-5") for -C or -P into a fresh
+ * array and return its length. Rejects malformed input the same way the numeric
+ * options do, so a typo fails loudly. A repeated option replaces the earlier list.
+ */
+static int parse_index_list(const char *argument_text, long index_limit, const char *list_name, int **parsed_indexes)
+{
+    const char *cursor = argument_text;
+    char *parse_end;
+    int *grown_indexes;
+    long range_first_index;
+    long range_last_index;
+    long range_index;
+    size_t indexes_capacity = 8;
+    int index_count = 0;
+
+    free(*parsed_indexes);
+    *parsed_indexes = malloc(indexes_capacity * sizeof(**parsed_indexes));
+    if (!*parsed_indexes) {
         perror("malloc");
         exit(EXIT_FAILURE);
     }
-    g_conf_pinned_cpu_count = 0;
 
     while (*cursor) {
         errno = 0;
-        range_first_cpu = strtol(cursor, &parse_end, 10);
+        range_first_index = strtol(cursor, &parse_end, 10);
         if (parse_end == cursor || errno != 0) {
-            fprintf(stderr, "Error: Invalid CPU list '%s'\n", argument_text);
+            fprintf(stderr, "Error: Invalid %s list '%s'\n", list_name, argument_text);
             exit(EXIT_FAILURE);
         }
-        range_last_cpu = range_first_cpu;
+        range_last_index = range_first_index;
         cursor = parse_end;
         if (*cursor == '-') {
             errno = 0;
-            range_last_cpu = strtol(cursor + 1, &parse_end, 10);
+            range_last_index = strtol(cursor + 1, &parse_end, 10);
             if (parse_end == cursor + 1 || errno != 0) {
-                fprintf(stderr, "Error: Invalid CPU list '%s'\n", argument_text);
+                fprintf(stderr, "Error: Invalid %s list '%s'\n", list_name, argument_text);
                 exit(EXIT_FAILURE);
             }
             cursor = parse_end;
         }
-        if (range_first_cpu < 0 || range_last_cpu < range_first_cpu || range_last_cpu >= cpu_id_limit) {
-            fprintf(stderr, "Error: CPU list '%s' out of range 0-%ld\n", argument_text, cpu_id_limit - 1);
+        if (range_first_index < 0 || range_last_index < range_first_index || range_last_index >= index_limit) {
+            fprintf(stderr, "Error: %s list '%s' out of range 0-%ld\n", list_name, argument_text,
+                    index_limit - 1);
             exit(EXIT_FAILURE);
         }
-        for (cpu_id = range_first_cpu; cpu_id <= range_last_cpu; ++cpu_id) {
-            if ((size_t)g_conf_pinned_cpu_count == cpu_ids_capacity) {
-                cpu_ids_capacity *= 2;
-                grown_cpu_ids =
-                    realloc(g_conf_pinned_cpu_ids, cpu_ids_capacity * sizeof(*g_conf_pinned_cpu_ids));
-                if (!grown_cpu_ids) {
+        for (range_index = range_first_index; range_index <= range_last_index; ++range_index) {
+            if ((size_t)index_count == indexes_capacity) {
+                indexes_capacity *= 2;
+                grown_indexes = realloc(*parsed_indexes, indexes_capacity * sizeof(**parsed_indexes));
+                if (!grown_indexes) {
                     perror("realloc");
                     exit(EXIT_FAILURE);
                 }
-                g_conf_pinned_cpu_ids = grown_cpu_ids;
+                *parsed_indexes = grown_indexes;
             }
-            g_conf_pinned_cpu_ids[g_conf_pinned_cpu_count] = (int)cpu_id;
-            ++g_conf_pinned_cpu_count;
+            (*parsed_indexes)[index_count] = (int)range_index;
+            ++index_count;
         }
         if (*cursor == ',') {
             ++cursor;
         } else if (*cursor != '\0') {
-            fprintf(stderr, "Error: Invalid CPU list '%s'\n", argument_text);
+            fprintf(stderr, "Error: Invalid %s list '%s'\n", list_name, argument_text);
             exit(EXIT_FAILURE);
         }
     }
 
-    if (g_conf_pinned_cpu_count == 0) {
-        fprintf(stderr, "Error: Empty CPU list\n");
+    if (index_count == 0) {
+        fprintf(stderr, "Error: Empty %s list\n", list_name);
         exit(EXIT_FAILURE);
     }
+    return index_count;
+}
+
+static void map_placement_pool(void)
+{
+    const long page_size = sysconf(_SC_PAGESIZE);
+    int highest_page = 0;
+
+    if (!g_conf_placement_pages) {
+        g_conf_placement_pages = calloc(1, sizeof(*g_conf_placement_pages));
+        if (!g_conf_placement_pages) {
+            perror("calloc");
+            exit(EXIT_FAILURE);
+        }
+        g_conf_placement_run_count = 1;
+    }
+    for (int run_index = 0; run_index < g_conf_placement_run_count; ++run_index) {
+        if (g_conf_placement_pages[run_index] > highest_page) {
+            highest_page = g_conf_placement_pages[run_index];
+        }
+    }
+
+    g_placement_page_stride = (page_size > 0) ? (size_t)page_size : 4096;
+    g_placement_pool_size = (size_t)(highest_page + 1) * g_placement_page_stride;
+    void *pool_mapping =
+        mmap(NULL, g_placement_pool_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pool_mapping == MAP_FAILED) {
+        perror("mmap");
+        exit(EXIT_FAILURE);
+    }
+    g_placement_pool = pool_mapping;
+}
+
+static struct contended_objects *placement_page_objects(int placement_page)
+{
+    return (struct contended_objects *)(g_placement_pool + ((size_t)placement_page * g_placement_page_stride));
 }
 
 /*
@@ -480,11 +539,14 @@ static inline void print_usage(const char *program_name)
             "  -S <ns>         Timer slack via prctl(PR_SET_TIMERSLACK); it stretches every\n"
             "                  nanosleep of ttas_park (0 restores the kernel default)\n"
             "  -F <format>     Output format: text (default) or csv, one row per contender\n"
+            "  -P <pages>      Run every contender once per listed page of a private pool,\n"
+            "                  e.g. 0-3 or 2,0,2 (range 0-%d, default: 0); each page holds\n"
+            "                  the locks and the shared counter at the same offsets\n"
             "  -h              Show this help and exit\n",
             program_name, MIN_THREAD_COUNT, MAX_THREAD_COUNT, DEFAULT_THREAD_COUNT, MIN_ITERATIONS,
             MAX_ITERATIONS, DEFAULT_ITERATIONS, MIN_WORKLOAD_NOP_LOOPS, MAX_WORKLOAD_NOP_LOOPS,
             DEFAULT_WORKLOAD_NOP_LOOPS, MIN_BACKOFF_PAUSES, MAX_BACKOFF_PAUSES, DEFAULT_SPIN_MIN,
-            MIN_BACKOFF_PAUSES, MAX_BACKOFF_PAUSES, DEFAULT_SPIN_MAX);
+            MIN_BACKOFF_PAUSES, MAX_BACKOFF_PAUSES, DEFAULT_SPIN_MAX, MAX_PLACEMENT_PAGES - 1);
 }
 
 static int parse_bounded_int(const char *argument_text, int minimum, int maximum, const char *option_name)
@@ -535,15 +597,13 @@ static void sleep_settle_gap(void)
     nanosleep(&settle_duration, NULL);
 }
 
-static struct contender_measurement run_contender(void *(*worker_routine)(void *), int is_measured_pass)
+static struct contender_measurement run_contender(void *(*worker_routine)(void *), int is_measured_pass,
+                                                  struct contended_objects *contended_objects)
 {
-    isolated_posix_spinlock_t isolated_posix_spinlock;
-    isolated_posix_mutex_t isolated_posix_mutex;
-    spinlock_ttas_t ttas_lock;
-    spinlock_mcs_t mcs_lock;
+    pthread_spinlock_t *const posix_spinlock = &contended_objects->isolated_posix_spinlock.lock;
+    pthread_mutex_t *const posix_mutex = &contended_objects->isolated_posix_mutex.lock;
     pthread_barrier_t start_barrier;
     struct worker_context context_template;
-    long long shared_counter = 0;
     double earliest_done_ms = 1e300;
     double latest_done_ms = 0.0;
     long voluntary_switches = 0;
@@ -553,29 +613,30 @@ static struct contender_measurement run_contender(void *(*worker_routine)(void *
         sleep_settle_gap();
     }
 
-    spin_init_ttas(&ttas_lock);
-    spin_init_mcs(&mcs_lock);
-    if (pthread_spin_init(&isolated_posix_spinlock.lock, PTHREAD_PROCESS_PRIVATE) != 0) {
+    spin_init_ttas(&contended_objects->ttas_lock);
+    spin_init_mcs(&contended_objects->mcs_lock);
+    contended_objects->shared_counter.value = 0;
+    if (pthread_spin_init(posix_spinlock, PTHREAD_PROCESS_PRIVATE) != 0) {
         perror("pthread_spin_init");
         exit(EXIT_FAILURE);
     }
-    if (pthread_mutex_init(&isolated_posix_mutex.lock, NULL) != 0) {
+    if (pthread_mutex_init(posix_mutex, NULL) != 0) {
         perror("pthread_mutex_init");
-        pthread_spin_destroy(&isolated_posix_spinlock.lock);
+        pthread_spin_destroy(posix_spinlock);
         exit(EXIT_FAILURE);
     }
     if (pthread_barrier_init(&start_barrier, NULL, (unsigned)g_conf_thread_count + 1) != 0) {
         perror("pthread_barrier_init");
-        pthread_mutex_destroy(&isolated_posix_mutex.lock);
-        pthread_spin_destroy(&isolated_posix_spinlock.lock);
+        pthread_mutex_destroy(posix_mutex);
+        pthread_spin_destroy(posix_spinlock);
         exit(EXIT_FAILURE);
     }
 
-    context_template.shared_counter = &shared_counter;
-    context_template.ttas_lock = &ttas_lock;
-    context_template.mcs_lock = &mcs_lock;
-    context_template.posix_spinlock = &isolated_posix_spinlock.lock;
-    context_template.posix_mutex = &isolated_posix_mutex.lock;
+    context_template.shared_counter = &contended_objects->shared_counter.value;
+    context_template.ttas_lock = &contended_objects->ttas_lock;
+    context_template.mcs_lock = &contended_objects->mcs_lock;
+    context_template.posix_spinlock = posix_spinlock;
+    context_template.posix_mutex = posix_mutex;
     context_template.start_barrier = &start_barrier;
     context_template.voluntary_switches = 0;
     context_template.involuntary_switches = 0;
@@ -585,8 +646,8 @@ static struct contender_measurement run_contender(void *(*worker_routine)(void *
     if (!worker_threads || !worker_contexts) {
         perror("calloc");
         pthread_barrier_destroy(&start_barrier);
-        pthread_mutex_destroy(&isolated_posix_mutex.lock);
-        pthread_spin_destroy(&isolated_posix_spinlock.lock);
+        pthread_mutex_destroy(posix_mutex);
+        pthread_spin_destroy(posix_spinlock);
         exit(EXIT_FAILURE);
     }
 
@@ -632,44 +693,46 @@ static struct contender_measurement run_contender(void *(*worker_routine)(void *
     const struct contender_measurement measurement = {
         .elapsed_ms = latest_done_ms,
         .earliest_done_ms = earliest_done_ms,
-        .shared_count = shared_counter,
+        .shared_count = contended_objects->shared_counter.value,
         .expected_count = (long long)g_conf_iterations * g_conf_thread_count,
         .voluntary_switches = voluntary_switches,
         .involuntary_switches = involuntary_switches,
     };
 
     pthread_barrier_destroy(&start_barrier);
-    pthread_spin_destroy(&isolated_posix_spinlock.lock);
-    pthread_mutex_destroy(&isolated_posix_mutex.lock);
+    pthread_spin_destroy(posix_spinlock);
+    pthread_mutex_destroy(posix_mutex);
     free(worker_threads);
     free(worker_contexts);
 
     return measurement;
 }
 
-static void print_contender_measurement(enum bench_lock lock_id, int run_position,
+static void print_contender_measurement(enum bench_lock lock_id, int run_position, int placement_page,
                                         const struct contender_measurement *measurement)
 {
     const int count_matched = measurement->shared_count == measurement->expected_count;
 
     if (g_conf_output_format == OUTPUT_FORMAT_CSV) {
-        printf("%s,%d,%d,%d,%d,%.4f,%d,%.6f,%lld,%lld,%d,%.6f,%ld,%ld\n", g_contenders[lock_id].cli_key,
-               run_position, g_conf_thread_count, g_conf_iterations, g_conf_workload_nop_loops,
-               g_measured_nop_ns, prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), measurement->elapsed_ms,
-               measurement->shared_count, measurement->expected_count, count_matched, measurement->earliest_done_ms,
-               measurement->voluntary_switches, measurement->involuntary_switches);
+        printf("%s,%d,%d,%d,%d,%.4f,%d,%.6f,%lld,%lld,%d,%.6f,%ld,%ld,%d\n",
+               g_contenders[lock_id].cli_key, run_position, g_conf_thread_count, g_conf_iterations,
+               g_conf_workload_nop_loops, g_measured_nop_ns, prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0),
+               measurement->elapsed_ms, measurement->shared_count, measurement->expected_count,
+               count_matched, measurement->earliest_done_ms, measurement->voluntary_switches,
+               measurement->involuntary_switches, placement_page);
         return;
     }
     printf("[ %-22s ]\n"
            "  - Elapsed Time : %10.3f ms\n"
            "  - Atomic Count : %10lld / %lld (%s)\n"
            "  - Fairness     : min %10.3f ms, max %10.3f ms, min/max %.2f\n"
-           "  - Switches     : %ld involuntary, %ld voluntary\n",
+           "  - Switches     : %ld involuntary, %ld voluntary\n"
+           "  - Placement    : page %d\n",
            g_contenders[lock_id].display_name, measurement->elapsed_ms, measurement->shared_count,
            measurement->expected_count, count_matched ? "OK" : "FAIL",
            measurement->earliest_done_ms, measurement->elapsed_ms,
            (measurement->elapsed_ms > 0.0) ? measurement->earliest_done_ms / measurement->elapsed_ms : 1.0,
-           measurement->involuntary_switches, measurement->voluntary_switches);
+           measurement->involuntary_switches, measurement->voluntary_switches, placement_page);
 }
 
 /*
@@ -685,7 +748,7 @@ static void run_warmup_pass(void *(*worker_routine)(void *))
     const int warmup_iterations = configured_iterations / 10;
 
     g_conf_iterations = (warmup_iterations > 0) ? warmup_iterations : 1;
-    run_contender(worker_routine, 0);
+    run_contender(worker_routine, 0, placement_page_objects(g_conf_placement_pages[0]));
     g_conf_iterations = configured_iterations;
 }
 
@@ -722,13 +785,18 @@ void bench_parse_args(int argc, char *argv[])
     }
 
     int option_char;
-    while ((option_char = getopt(argc, argv, "+t:i:l:m:M:C:K:S:F:")) != -1) {
+    while ((option_char = getopt(argc, argv, "+t:i:l:m:M:C:K:S:F:P:")) != -1) {
         switch (option_char) {
         case 't':
             g_conf_thread_count = parse_bounded_int(optarg, MIN_THREAD_COUNT, MAX_THREAD_COUNT, "threads");
             break;
         case 'C':
-            parse_cpu_list(optarg);
+            g_conf_pinned_cpu_count =
+                parse_index_list(optarg, configured_cpu_id_limit(), "CPU", &g_conf_pinned_cpu_ids);
+            break;
+        case 'P':
+            g_conf_placement_run_count =
+                parse_index_list(optarg, MAX_PLACEMENT_PAGES, "page", &g_conf_placement_pages);
             break;
         case 'K':
             parse_contender_list(optarg);
@@ -754,7 +822,7 @@ void bench_parse_args(int argc, char *argv[])
             break;
         case '?':
             if (optopt == 't' || optopt == 'i' || optopt == 'l' || optopt == 'm' || optopt == 'M' ||
-                optopt == 'C' || optopt == 'K' || optopt == 'S' || optopt == 'F') {
+                optopt == 'C' || optopt == 'K' || optopt == 'S' || optopt == 'F' || optopt == 'P') {
                 fprintf(stderr, "Error: Option '-%c' requires an argument.\n", optopt);
             } else {
                 fprintf(stderr, "Error: Unknown option '-%c'.\n", optopt);
@@ -782,6 +850,8 @@ void bench_parse_args(int argc, char *argv[])
         perror("prctl(PR_SET_TIMERSLACK)");
         exit(EXIT_FAILURE);
     }
+
+    map_placement_pool();
 }
 
 /*
@@ -880,17 +950,20 @@ void bench_run_all(struct bench_results *results)
         results->elapsed_ms[contender_index] = -1.0;
     }
 
-    for (int run_position = 0; run_position < g_contender_run_count; ++run_position) {
-        const enum bench_lock lock_id = g_contender_run_order[run_position];
-        if (run_position > 0 && g_conf_output_format == OUTPUT_FORMAT_TEXT) {
-            printf("\n");
-        }
-        const struct contender_measurement measurement =
-            run_contender(g_contenders[lock_id].worker_routine, 1);
-        print_contender_measurement(lock_id, run_position, &measurement);
-        results->elapsed_ms[lock_id] = measurement.elapsed_ms;
-        if (measurement.shared_count != measurement.expected_count) {
-            ++results->failed_atomic_count_checks;
+    for (int placement_run = 0; placement_run < g_conf_placement_run_count; ++placement_run) {
+        const int placement_page = g_conf_placement_pages[placement_run];
+        for (int run_position = 0; run_position < g_contender_run_count; ++run_position) {
+            const enum bench_lock lock_id = g_contender_run_order[run_position];
+            if ((placement_run > 0 || run_position > 0) && g_conf_output_format == OUTPUT_FORMAT_TEXT) {
+                printf("\n");
+            }
+            const struct contender_measurement measurement = run_contender(
+                g_contenders[lock_id].worker_routine, 1, placement_page_objects(placement_page));
+            print_contender_measurement(lock_id, run_position, placement_page, &measurement);
+            results->elapsed_ms[lock_id] = measurement.elapsed_ms;
+            if (measurement.shared_count != measurement.expected_count) {
+                ++results->failed_atomic_count_checks;
+            }
         }
     }
 }
@@ -904,7 +977,7 @@ void bench_print_summary(const struct bench_results *results)
     const char *winner_name = NULL;
     double best_ms = 1e300;
 
-    if (!results || g_conf_output_format == OUTPUT_FORMAT_CSV) {
+    if (!results || g_conf_output_format == OUTPUT_FORMAT_CSV || g_conf_placement_run_count > 1) {
         return;
     }
 
@@ -938,4 +1011,11 @@ void bench_cleanup(void)
     free(g_conf_pinned_cpu_ids);
     g_conf_pinned_cpu_ids = NULL;
     g_conf_pinned_cpu_count = 0;
+    free(g_conf_placement_pages);
+    g_conf_placement_pages = NULL;
+    g_conf_placement_run_count = 0;
+    if (g_placement_pool) {
+        munmap(g_placement_pool, g_placement_pool_size);
+        g_placement_pool = NULL;
+    }
 }

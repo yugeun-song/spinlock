@@ -21,6 +21,7 @@
 #define MAX_BACKOFF_PAUSES (INT_MAX / 2)
 #define NOP_CALIBRATION_LOOPS 1000000
 #define NOP_CALIBRATION_PASSES 8
+#define MAX_PLACEMENT_PAGES 64
 
 /*
  * Quiescent gap inserted right before each measured benchmark so the system
