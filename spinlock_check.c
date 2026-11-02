@@ -49,7 +49,7 @@ struct contended_worker_args {
 enum misuse_kind {
     MISUSE_TTAS_UNLOCK_NOT_HELD,
     MISUSE_MCS_UNLOCK_EMPTY_QUEUE,
-    MISUSE_MCS_WRAPPER_NESTED
+    MISUSE_MCS_WRAPPER_NESTED,
 };
 #endif
 

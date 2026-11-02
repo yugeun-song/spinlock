@@ -473,8 +473,10 @@ static int parse_bounded_int(const char *argument_text, int minimum, int maximum
 
 static void sleep_settle_gap(void)
 {
-    const struct timespec settle_duration = {.tv_sec = SETTLE_DELAY_MS / 1000,
-                                             .tv_nsec = (long)(SETTLE_DELAY_MS % 1000) * 1000000L};
+    const struct timespec settle_duration = {
+        .tv_sec = SETTLE_DELAY_MS / 1000,
+        .tv_nsec = (long)(SETTLE_DELAY_MS % 1000) * 1000000L,
+    };
     nanosleep(&settle_duration, NULL);
 }
 
@@ -808,8 +810,10 @@ void bench_run_all(struct bench_results *results)
 
 void bench_print_summary(const struct bench_results *results)
 {
-    static const int summary_order[BENCH_LOCK_COUNT] = {BENCH_LOCK_TTAS, BENCH_LOCK_TTAS_PARK, BENCH_LOCK_MCS,
-                                                        BENCH_LOCK_POSIX_SPINLOCK, BENCH_LOCK_POSIX_MUTEX};
+    static const int summary_order[BENCH_LOCK_COUNT] = {
+        BENCH_LOCK_TTAS,           BENCH_LOCK_TTAS_PARK,   BENCH_LOCK_MCS,
+        BENCH_LOCK_POSIX_SPINLOCK, BENCH_LOCK_POSIX_MUTEX,
+    };
     const char *winner_name = NULL;
     double best_ms = 1e300;
 

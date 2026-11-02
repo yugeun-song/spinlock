@@ -35,7 +35,7 @@ enum bench_lock {
     BENCH_LOCK_POSIX_SPINLOCK,
     BENCH_LOCK_POSIX_MUTEX,
     BENCH_LOCK_MCS,
-    BENCH_LOCK_COUNT
+    BENCH_LOCK_COUNT,
 };
 
 struct bench_results {
