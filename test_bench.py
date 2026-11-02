@@ -40,7 +40,7 @@ META_PATH: Path = Path("bench_meta.json")
 LOCKS: list[str] = ["ttas", "ttas_park", "mcs", "pspin", "pmutex"]
 CSV_FIELDS: list[str] = ["workload_nops", "threads", "lock", "iterations", "run_idx", "launch_index",
                          "run_position", "time_ms_normalized_to_1m_iters", "fairness_min_over_max",
-                         "load_1min"]
+                         "voluntary_switches", "involuntary_switches", "runnable_tasks"]
 
 
 def mad(arr: np.ndarray) -> float:
@@ -53,11 +53,12 @@ def robust_cv(values: np.ndarray) -> float:
     return mad(values) / median if median > 0 else 0.0
 
 
-def read_load_average() -> float:
+def read_runnable_tasks() -> float:
     try:
-        return float(Path("/proc/loadavg").read_text().split()[0])
+        running = int(Path("/proc/loadavg").read_text().split()[3].split("/")[0])
     except (OSError, ValueError, IndexError):
         return float("nan")
+    return float(max(running - 1, 0))
 
 
 def get_cpu_model() -> str:
@@ -165,6 +166,8 @@ def run_launch(benchmark_bin: Path, threads: int, workload: int, pin_cores: list
             "fairness": float(row["earliest_done_ms"]) / elapsed_ms if elapsed_ms > 0 else 1.0,
             "nop_ns": float(row["nop_ns"]),
             "timer_slack_ns": int(row["timer_slack_ns"]),
+            "voluntary_switches": int(row["voluntary_switches"]),
+            "involuntary_switches": int(row["involuntary_switches"]),
         }
     return measured
 
@@ -185,8 +188,8 @@ class SweepRunner:
     def launch(self, workload: int, threads: int) -> tuple[dict[str, dict] | None, float]:
         lock_order = [str(lock) for lock in self.rng.permutation(locks_for(threads, self.core_budget))]
         time.sleep(SETTLE_SEC)
-        load_1min = read_load_average()
-        return run_launch(self.benchmark_bin, threads, workload, self.pin_cores, lock_order), load_1min
+        runnable_tasks = read_runnable_tasks()
+        return run_launch(self.benchmark_bin, threads, workload, self.pin_cores, lock_order), runnable_tasks
 
     def warm_up(self, cells: list[tuple[int, int]]) -> None:
         for cell_index in self.rng.choice(len(cells), WARMUP_LAUNCHES):
@@ -197,14 +200,14 @@ class SweepRunner:
         self.planned_launches += len(schedule)
         failed_cells: list[tuple[int, int]] = []
         for workload, threads in schedule:
-            measured, load_1min = self.launch(workload, threads)
+            measured, runnable_tasks = self.launch(workload, threads)
             self.finished_launches += 1
             if measured is None:
                 self.failed_launches += 1
                 failed_cells.append((workload, threads))
             else:
                 self.launches_by_cell[(workload, threads)].append(
-                    {"launch_index": self.launch_index, "load_1min": load_1min, "locks": measured})
+                    {"launch_index": self.launch_index, "runnable_tasks": runnable_tasks, "locks": measured})
                 self.launch_index += 1
             percent = self.finished_launches / self.planned_launches * 100
             sys.stdout.write(f"\rProgress: [{'=' * int(percent // 2):<50}] {percent:5.1f}% "
@@ -243,9 +246,12 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunn
     slack_values = [values["timer_slack_ns"] for record in records for values in record["locks"].values()]
     nop_ns = float(np.median(nop_values)) if nop_values else 0.0
     slack = int(np.median(slack_values)) if slack_values else -1
-    loads = np.asarray([record["load_1min"] for record in records], float)
+    runnable = np.asarray([record["runnable_tasks"] for record in records], float)
     total_raw_cycles = sum(pick_iterations(workload) * threads * len(record["locks"])
                            for workload, threads in cells for record in runner.launches_by_cell[(workload, threads)])
+    within_budget = [values["involuntary_switches"] for workload, threads in cells if threads <= runner.core_budget
+                     for record in runner.launches_by_cell[(workload, threads)] for values in record["locks"].values()]
+    preempted = sum(count > 0 for count in within_budget)
 
     print(f"\n{sep}")
     print("SYSTEM & PERFORMANCE REPORT: HYBRID SPINLOCK BENCHMARK")
@@ -263,8 +269,12 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunn
           f"(more when robust CV > {NOISY_CELL_CV:.0%}), {WARMUP_LAUNCHES} warmup launches discarded")
     print(f"  - Schedule        : shuffled launches, shuffled lock order per launch, seed {seed}")
     print(f"  - Launches        : {runner.launch_index} kept, {runner.failed_launches} rejected")
-    if loads.size and np.isfinite(loads).any():
-        print(f"  - Load (1 min)    : median {np.nanmedian(loads):.2f}, max {np.nanmax(loads):.2f}")
+    if runnable.size and np.isfinite(runnable).any():
+        print(f"  - Other runnable  : median {np.nanmedian(runnable):.0f}, max {np.nanmax(runnable):.0f} "
+              f"tasks before a launch")
+    if within_budget:
+        print(f"  - Preemption      : {preempted} of {len(within_budget)} lock runs within the core budget "
+              f"had involuntary switches (max {max(within_budget)})")
     print("  - Normalization   : 1,000,000 Lock/Unlock cycles")
     print(f"  - Total Raw Ops   : {total_raw_cycles:,} cycles performed")
     print(f"  - Pinning         : {pin_desc}")
@@ -301,7 +311,8 @@ def write_csv(path: Path, runner: SweepRunner, cells: list[tuple[int, int]]) -> 
                         continue
                     w.writerow([workload, threads, lock, pick_iterations(workload), run_idx,
                                 record["launch_index"], values["run_position"], f"{values['time_ms']:.6f}",
-                                f"{values['fairness']:.4f}", f"{record['load_1min']:.2f}"])
+                                f"{values['fairness']:.4f}", values["voluntary_switches"],
+                                values["involuntary_switches"], f"{record['runnable_tasks']:.0f}"])
 
 
 def write_meta(path: Path, cpu_model: str, pin_cores: list[int], threads_range: list[int],
@@ -311,7 +322,7 @@ def write_meta(path: Path, cpu_model: str, pin_cores: list[int], threads_range: 
     records = [record for cell in cells for record in runner.launches_by_cell[cell]]
     nop_values = [values["nop_ns"] for record in records for values in record["locks"].values()]
     slack_values = [values["timer_slack_ns"] for record in records for values in record["locks"].values()]
-    loads = np.asarray([record["load_1min"] for record in records], float)
+    runnable = np.asarray([record["runnable_tasks"] for record in records], float)
     meta = {
         "cpu_model": cpu_model,
         "cores_pinned": len(pin_cores) if pin_cores else num_cpus,
@@ -327,8 +338,8 @@ def write_meta(path: Path, cpu_model: str, pin_cores: list[int], threads_range: 
         "warmup_launches": WARMUP_LAUNCHES,
         "launches_kept": runner.launch_index,
         "launches_rejected": runner.failed_launches,
-        "load_1min": {"median": float(np.nanmedian(loads)), "max": float(np.nanmax(loads))}
-        if loads.size and np.isfinite(loads).any() else None,
+        "runnable_tasks": {"median": float(np.nanmedian(runnable)), "max": float(np.nanmax(runnable))}
+        if runnable.size and np.isfinite(runnable).any() else None,
     }
     path.write_text(json.dumps(meta, indent=2) + "\n")
 
