@@ -421,7 +421,7 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
     draw_heatmap(axh2, mm, sm, workloads, threads,
                  "MCS/TTAS elapsed-time ratio   (>1 = TTAS finished sooner)", hm_norm, hm_vmax)
     cb = fig.colorbar(im, ax=[axh1, axh2], fraction=0.03, pad=0.02)
-    cb.set_label("log2(elapsed ratio) · 0 = break-even · grey = within run-to-run noise",
+    cb.set_label("log2(elapsed ratio) · 0 = break-even · grey = not significant (5% FDR)",
                  color=INK_MUTED, fontsize=8.5)
     shrink_to_fit(cb.ax.yaxis.label, renderer, max_height=cb.ax.get_window_extent(renderer).height)
     cb.ax.yaxis.set_tick_params(color=INK_MUTED)
