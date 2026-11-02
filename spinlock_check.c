@@ -70,7 +70,7 @@ static void report_fail(const char *check_name, const char *detail)
     printf("[FAIL] %s: %s\n", check_name, detail);
 }
 
-static void __attribute__((unused)) report_skip(const char *check_name, const char *reason)
+static void report_skip(const char *check_name, const char *reason)
 {
     printf("[SKIP] %s: %s\n", check_name, reason);
 }
@@ -96,48 +96,36 @@ static void probe_leave_critical_section(struct overlap_probe *probe)
 
 static void acquire_ttas(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b)
 {
-    (void)node_a;
-    (void)node_b;
     spin_lock_ttas(&locks->ttas_lock);
 }
 
 static void acquire_ttas_park(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b)
 {
-    (void)node_a;
-    (void)node_b;
     spin_lock_ttas_park(&locks->ttas_lock);
 }
 
 static void release_ttas(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b)
 {
-    (void)node_a;
-    (void)node_b;
     spin_unlock_ttas(&locks->ttas_lock);
 }
 
 static void acquire_mcs_wrapper(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b)
 {
-    (void)node_a;
-    (void)node_b;
     spin_lock_mcs(&locks->mcs_outer_lock);
 }
 
 static void release_mcs_wrapper(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b)
 {
-    (void)node_a;
-    (void)node_b;
     spin_unlock_mcs(&locks->mcs_outer_lock);
 }
 
 static void acquire_mcs_explicit_node(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b)
 {
-    (void)node_b;
     spin_lock_mcs_node(&locks->mcs_outer_lock, node_a);
 }
 
 static void release_mcs_explicit_node(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b)
 {
-    (void)node_b;
     spin_unlock_mcs_node(&locks->mcs_outer_lock, node_a);
 }
 
@@ -155,16 +143,10 @@ static void release_mcs_nested(struct contended_lock_pair *locks, mcs_node_t *no
 
 static void acquire_broken_no_op(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b)
 {
-    (void)locks;
-    (void)node_a;
-    (void)node_b;
 }
 
 static void release_broken_no_op(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b)
 {
-    (void)locks;
-    (void)node_a;
-    (void)node_b;
 }
 
 static void *contended_worker(void *raw_args)
