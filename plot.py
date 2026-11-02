@@ -13,8 +13,10 @@ Design notes / statistical choices:
     value is multiplied by the thread count internally; dividing it back by the
     thread count yields a latency that is comparable across thread counts, so a
     rising line means genuine contention overhead, not just more work retired.
-  * Central mark = median of the runs (robust for right-skewed, floor-bounded
-    latency). Each lock's runs form a candle (body = interquartile range,
+  * Each launch value is the geometric mean of its runs, one per lock
+    placement (page), because the L3 slice a page maps to moves the time.
+  * Central mark = median of the launches (robust for right-skewed, floor-bounded
+    latency). Each lock's launches form a candle (body = interquartile range,
     wicks = min/max), showing spread without an error bar posing as a CI.
   * Threads beyond the pinned core count are an oversubscribed regime (shaded)
     that hits every lock, not just MCS; disclosed rather than hidden.
@@ -75,7 +77,7 @@ SPEEDUP_CMAP = LinearSegmentedColormap.from_list(
 
 
 def load_csv(path: Path):
-    raw: dict[tuple[int, int, str], dict[int, float]] = defaultdict(dict)
+    samples: dict[tuple[int, int, str], dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
     workloads: set[int] = set()
     threads: set[int] = set()
     with path.open(newline="") as f:
@@ -90,9 +92,11 @@ def load_csv(path: Path):
             # ms/1M-ops, which numerically equals ns/op * thread_count. Divide it
             # back out so the y-axis is a true per-acquisition latency.
             ns_per_op = float(row["time_ms_normalized_to_1m_iters"]) / t
-            raw[(wl, t, lock)][int(row["run_idx"])] = ns_per_op
+            samples[(wl, t, lock)][int(row["run_idx"])].append(ns_per_op)
             workloads.add(wl)
             threads.add(t)
+    raw = {key: {run: float(np.exp(np.mean(np.log(values)))) for run, values in runs.items()}
+           for key, runs in samples.items()}
     return raw, sorted(workloads), sorted(threads)
 
 
@@ -351,6 +355,7 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
     cpu = cpu_model or meta.get("cpu_model", "unknown CPU")
     cores = int(meta.get("cores_pinned") or (max(threads) // 2 if threads else 1))
     pin_desc = meta.get("pin_desc", f"{cores} cores")
+    placements = meta.get("placements_per_launch", 1)
     nop_ns = meta.get("nop_ns")
     rng = np.random.default_rng(20240716)
 
@@ -433,8 +438,9 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
         fontsize=17, fontweight="bold", color=INK, x=0.06, ha="left", y=0.983)
     subtitle_text = fig.text(
         0.06, 0.953,
-        "lock/unlock latency amortised across all threads · candle = all runs (body = interquartile "
-        "range, wick = min–max), line = median · shaded = oversubscribed (threads > pinned cores)",
+        "lock/unlock latency amortised across all threads · candle = all launches, each the geometric "
+        f"mean over {placements} lock placements (body = interquartile range, wick = min–max), "
+        "line = median · shaded = oversubscribed (threads > pinned cores)",
         ha="left", fontsize=12, color=INK_MUTED)
     footer_text = fig.text(
         0.06, 0.016,

@@ -18,6 +18,7 @@ REPEATS: int = 7
 REPEATS_MAX: int = 14
 NOISY_CELL_CV: float = 0.05
 WARMUP_LAUNCHES: int = 3
+PLACEMENTS_PER_LAUNCH: int = 4
 LAUNCH_TIMEOUT_SEC: int = 120
 # Quiescent gap between consecutive benchmark process launches, so each run
 # starts from a settled system (scheduler drained, CPU frequency relaxed,
@@ -39,8 +40,8 @@ META_PATH: Path = Path("bench_meta.json")
 
 LOCKS: list[str] = ["ttas", "ttas_park", "mcs", "pspin", "pmutex"]
 CSV_FIELDS: list[str] = ["workload_nops", "threads", "lock", "iterations", "run_idx", "launch_index",
-                         "run_position", "time_ms_normalized_to_1m_iters", "fairness_min_over_max",
-                         "voluntary_switches", "involuntary_switches", "runnable_tasks"]
+                         "placement_page", "run_position", "time_ms_normalized_to_1m_iters",
+                         "fairness_min_over_max", "voluntary_switches", "involuntary_switches", "runnable_tasks"]
 
 
 def mad(arr: np.ndarray) -> float:
@@ -142,7 +143,7 @@ def run_launch(benchmark_bin: Path, threads: int, workload: int, pin_cores: list
                lock_order: list[str]) -> dict[str, dict] | None:
     iterations = pick_iterations(workload)
     command = [str(benchmark_bin), "-F", "csv", "-t", str(threads), "-l", str(workload),
-               "-i", str(iterations), "-K", ",".join(lock_order)]
+               "-i", str(iterations), "-K", ",".join(lock_order), "-P", f"0-{PLACEMENTS_PER_LAUNCH - 1}"]
     if pin_cores:
         command += ["-C", ",".join(map(str, pin_cores))]
     try:
@@ -150,24 +151,34 @@ def run_launch(benchmark_bin: Path, threads: int, workload: int, pin_cores: list
     except subprocess.TimeoutExpired:
         print(f"\nWarning: launch timed out (threads={threads}, workload={workload})", file=sys.stderr)
         return None
-    rows = {row["lock"]: row for row in csv.DictReader(io.StringIO(completed.stdout))}
-    if completed.returncode != 0 or set(rows) != set(lock_order) or \
-            any(row["count_ok"] != "1" for row in rows.values()):
+    rows_by_lock: dict[str, list[dict]] = defaultdict(list)
+    for row in csv.DictReader(io.StringIO(completed.stdout)):
+        rows_by_lock[row["lock"]].append(row)
+    if completed.returncode != 0 or set(rows_by_lock) != set(lock_order) or \
+            any(len(rows) != PLACEMENTS_PER_LAUNCH for rows in rows_by_lock.values()) or \
+            any(row["count_ok"] != "1" for rows in rows_by_lock.values() for row in rows):
         print(f"\nWarning: rejected launch (threads={threads}, workload={workload}, "
               f"exit {completed.returncode}) {completed.stderr.strip()[:160]}", file=sys.stderr)
         return None
     scale = 1_000_000 / iterations
     measured: dict[str, dict] = {}
-    for lock, row in rows.items():
-        elapsed_ms = float(row["elapsed_ms"])
+    for lock, rows in rows_by_lock.items():
+        runs = []
+        for row in rows:
+            elapsed_ms = float(row["elapsed_ms"])
+            runs.append({
+                "placement_page": int(row["placement_page"]),
+                "run_position": int(row["run_position"]),
+                "time_ms": elapsed_ms * scale,
+                "fairness": float(row["earliest_done_ms"]) / elapsed_ms if elapsed_ms > 0 else 1.0,
+                "voluntary_switches": int(row["voluntary_switches"]),
+                "involuntary_switches": int(row["involuntary_switches"]),
+            })
         measured[lock] = {
-            "time_ms": elapsed_ms * scale,
-            "run_position": int(row["run_position"]),
-            "fairness": float(row["earliest_done_ms"]) / elapsed_ms if elapsed_ms > 0 else 1.0,
-            "nop_ns": float(row["nop_ns"]),
-            "timer_slack_ns": int(row["timer_slack_ns"]),
-            "voluntary_switches": int(row["voluntary_switches"]),
-            "involuntary_switches": int(row["involuntary_switches"]),
+            "time_ms": float(np.exp(np.mean(np.log([run["time_ms"] for run in runs])))),
+            "nop_ns": float(rows[0]["nop_ns"]),
+            "timer_slack_ns": int(rows[0]["timer_slack_ns"]),
+            "runs": runs,
         }
     return measured
 
@@ -247,10 +258,12 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunn
     nop_ns = float(np.median(nop_values)) if nop_values else 0.0
     slack = int(np.median(slack_values)) if slack_values else -1
     runnable = np.asarray([record["runnable_tasks"] for record in records], float)
-    total_raw_cycles = sum(pick_iterations(workload) * threads * len(record["locks"])
-                           for workload, threads in cells for record in runner.launches_by_cell[(workload, threads)])
-    within_budget = [values["involuntary_switches"] for workload, threads in cells if threads <= runner.core_budget
-                     for record in runner.launches_by_cell[(workload, threads)] for values in record["locks"].values()]
+    total_raw_cycles = sum(pick_iterations(workload) * threads * len(values["runs"])
+                           for workload, threads in cells for record in runner.launches_by_cell[(workload, threads)]
+                           for values in record["locks"].values())
+    within_budget = [run["involuntary_switches"] for workload, threads in cells if threads <= runner.core_budget
+                     for record in runner.launches_by_cell[(workload, threads)] for values in record["locks"].values()
+                     for run in values["runs"]]
     preempted = sum(count > 0 for count in within_budget)
 
     print(f"\n{sep}")
@@ -265,8 +278,10 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunn
     print(f"  - Timer Slack     : {slack} ns")
     print(line)
     print("TEST PARAMETERS:")
-    print(f"  - Aggregation     : Median ± MAD of {REPEATS}-{REPEATS_MAX} runs per cell "
+    print(f"  - Aggregation     : Median ± MAD of {REPEATS}-{REPEATS_MAX} launches per cell "
           f"(more when robust CV > {NOISY_CELL_CV:.0%}), {WARMUP_LAUNCHES} warmup launches discarded")
+    print(f"  - Placement       : each launch value is the geometric mean of {PLACEMENTS_PER_LAUNCH} runs, "
+          f"one per page of lock placement (-P 0-{PLACEMENTS_PER_LAUNCH - 1})")
     print(f"  - Schedule        : shuffled launches, shuffled lock order per launch, seed {seed}")
     print(f"  - Launches        : {runner.launch_index} kept, {runner.failed_launches} rejected")
     if runnable.size and np.isfinite(runnable).any():
@@ -280,7 +295,7 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunn
     print(f"  - Pinning         : {pin_desc}")
     print(f"  - Bench Duration  : {duration:.2f} seconds")
     print(sep)
-    print(f"{'Workload (NOPs)':<16} | {'CS (ns)':<8} | {'Threads':<8} | {'Runs':<5} | "
+    print(f"{'Workload (NOPs)':<16} | {'CS (ns)':<8} | {'Threads':<8} | {'Launches':<8} | "
           f"{'TTAS (ms)':<18} | {'TTAS park (ms)':<18} | {'MCS (ms)':<18} | "
           f"{'PSpin (ms)':<18} | {'PMutex (ms)':<18} | {'PSpin/TTAS':<10}")
     print(line)
@@ -292,7 +307,7 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunn
             texts.append(f"{np.median(values):.3f} ±{mad(values):.1f}" if values.size else "— (skipped)")
         runs = len(runner.launches_by_cell[(workload, threads)])
         ratio = paired_median_ratio(runner, (workload, threads), "pspin")
-        print(f"{workload:<16} | {workload * nop_ns:<8.1f} | {threads:<8} | {runs:<5} | "
+        print(f"{workload:<16} | {workload * nop_ns:<8.1f} | {threads:<8} | {runs:<8} | "
               + " | ".join(f"{text:<18}" for text in texts) + f" | {ratio:.2f}x")
         if threads == threads_range[-1]:
             print(line)
@@ -309,10 +324,11 @@ def write_csv(path: Path, runner: SweepRunner, cells: list[tuple[int, int]]) -> 
                     values = record["locks"].get(lock)
                     if values is None:
                         continue
-                    w.writerow([workload, threads, lock, pick_iterations(workload), run_idx,
-                                record["launch_index"], values["run_position"], f"{values['time_ms']:.6f}",
-                                f"{values['fairness']:.4f}", values["voluntary_switches"],
-                                values["involuntary_switches"], f"{record['runnable_tasks']:.0f}"])
+                    for run in values["runs"]:
+                        w.writerow([workload, threads, lock, pick_iterations(workload), run_idx,
+                                    record["launch_index"], run["placement_page"], run["run_position"],
+                                    f"{run['time_ms']:.6f}", f"{run['fairness']:.4f}", run["voluntary_switches"],
+                                    run["involuntary_switches"], f"{record['runnable_tasks']:.0f}"])
 
 
 def write_meta(path: Path, cpu_model: str, pin_cores: list[int], threads_range: list[int],
@@ -336,6 +352,7 @@ def write_meta(path: Path, cpu_model: str, pin_cores: list[int], threads_range: 
         "repeats_max": REPEATS_MAX,
         "noisy_cell_cv": NOISY_CELL_CV,
         "warmup_launches": WARMUP_LAUNCHES,
+        "placements_per_launch": PLACEMENTS_PER_LAUNCH,
         "launches_kept": runner.launch_index,
         "launches_rejected": runner.failed_launches,
         "runnable_tasks": {"median": float(np.nanmedian(runnable)), "max": float(np.nanmax(runnable))}
