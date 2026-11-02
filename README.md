@@ -153,7 +153,7 @@ Run the binary directly from the command line. If no arguments are provided, def
 | `-F` | `<format>` | **Output**: `text`, or `csv` with one row per contender (what `test_bench.py` reads). | `text` |
 | `-h` | N/A | **Help**: Display usage information and exit. | N/A |
 
-The header also prints the measured cost of one workload loop iteration (`NOP Cost`, taken once at startup on the first pinned core) so critical-section sizes can be read in nanoseconds. Each contender prints a **`Fairness`** line: the earliest and latest per-thread completion time measured from the start barrier, and their ratio (`min/max`; `1.00` means every thread finished together, a small value means one thread ran through while the others waited). The process exits with status 1 if any contender's atomic count is wrong.
+The header also prints the measured cost of one workload loop iteration (`NOP Cost`, taken once at startup on the first pinned core) so critical-section sizes can be read in nanoseconds. Each contender prints a **`Fairness`** line: the earliest and latest per-thread completion time measured from the start barrier, and their ratio (`min/max`; `1.00` means every thread finished together, a small value means one thread ran through while the others waited). A **`Switches`** line counts the workers' involuntary (preemption) and voluntary context switches. The process exits with status 1 if any contender's atomic count is wrong.
 
 ### Execution Examples
 

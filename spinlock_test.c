@@ -15,6 +15,7 @@
 
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 
 /*
  * Contenders accepted by -K, which also sets the run order. The default is this
@@ -25,7 +26,7 @@
 #define MEASUREMENT_CSV_HEADER                                                                     \
     "lock,run_position,threads,iterations,workload_nops,nop_ns,timer_slack_ns,elapsed_ms,shared_"  \
     "count,"                                                                                       \
-    "expected_count,count_ok,earliest_done_ms"
+    "expected_count,count_ok,earliest_done_ms,voluntary_switches,involuntary_switches"
 
 /*
  * Cache-line-isolated wrapper for the POSIX spinlock. pthread_spinlock_t is a
@@ -56,6 +57,8 @@ struct worker_context {
     pthread_barrier_t *start_barrier;
     struct timespec loop_begin_time;
     struct timespec loop_done_time;
+    long voluntary_switches;
+    long involuntary_switches;
 };
 
 struct contender {
@@ -76,6 +79,8 @@ struct contender_measurement {
     double earliest_done_ms;
     long long shared_count;
     long long expected_count;
+    long voluntary_switches;
+    long involuntary_switches;
 };
 
 enum output_format {
@@ -130,6 +135,17 @@ static inline void run_dummy_workload(int nop_loop_count)
     }
 }
 
+static void record_loop_end(struct worker_context *context)
+{
+    struct rusage thread_usage;
+
+    clock_gettime(CLOCK_MONOTONIC, &context->loop_done_time);
+    if (getrusage(RUSAGE_THREAD, &thread_usage) == 0) {
+        context->voluntary_switches = thread_usage.ru_nvcsw;
+        context->involuntary_switches = thread_usage.ru_nivcsw;
+    }
+}
+
 static void *worker_routine_ttas(void *raw_context)
 {
     struct worker_context *context = (struct worker_context *)raw_context;
@@ -153,7 +169,7 @@ static void *worker_routine_ttas(void *raw_context)
         spin_unlock_ttas(lock);
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &context->loop_done_time);
+    record_loop_end(context);
     return NULL;
 }
 
@@ -180,7 +196,7 @@ static void *worker_routine_ttas_park(void *raw_context)
         spin_unlock_ttas(lock);
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &context->loop_done_time);
+    record_loop_end(context);
     return NULL;
 }
 
@@ -207,7 +223,7 @@ static void *worker_routine_mcs(void *raw_context)
         spin_unlock_mcs(lock);
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &context->loop_done_time);
+    record_loop_end(context);
     return NULL;
 }
 
@@ -234,7 +250,7 @@ static void *worker_routine_posix_spinlock(void *raw_context)
         pthread_spin_unlock(lock);
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &context->loop_done_time);
+    record_loop_end(context);
     return NULL;
 }
 
@@ -261,7 +277,7 @@ static void *worker_routine_posix_mutex(void *raw_context)
         pthread_mutex_unlock(lock);
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &context->loop_done_time);
+    record_loop_end(context);
     return NULL;
 }
 
@@ -530,6 +546,8 @@ static struct contender_measurement run_contender(void *(*worker_routine)(void *
     long long shared_counter = 0;
     double earliest_done_ms = 1e300;
     double latest_done_ms = 0.0;
+    long voluntary_switches = 0;
+    long involuntary_switches = 0;
 
     if (is_measured_pass) {
         sleep_settle_gap();
@@ -559,6 +577,8 @@ static struct contender_measurement run_contender(void *(*worker_routine)(void *
     context_template.posix_spinlock = &isolated_posix_spinlock.lock;
     context_template.posix_mutex = &isolated_posix_mutex.lock;
     context_template.start_barrier = &start_barrier;
+    context_template.voluntary_switches = 0;
+    context_template.involuntary_switches = 0;
 
     pthread_t *worker_threads = calloc((size_t)g_conf_thread_count, sizeof(*worker_threads));
     struct worker_context *worker_contexts = calloc((size_t)g_conf_thread_count, sizeof(*worker_contexts));
@@ -605,6 +625,8 @@ static struct contender_measurement run_contender(void *(*worker_routine)(void *
             elapsed_milliseconds_between(&earliest_begin_time, &worker_contexts[worker_index].loop_done_time);
         earliest_done_ms = (done_ms < earliest_done_ms) ? done_ms : earliest_done_ms;
         latest_done_ms = (done_ms > latest_done_ms) ? done_ms : latest_done_ms;
+        voluntary_switches += worker_contexts[worker_index].voluntary_switches;
+        involuntary_switches += worker_contexts[worker_index].involuntary_switches;
     }
 
     const struct contender_measurement measurement = {
@@ -612,6 +634,8 @@ static struct contender_measurement run_contender(void *(*worker_routine)(void *
         .earliest_done_ms = earliest_done_ms,
         .shared_count = shared_counter,
         .expected_count = (long long)g_conf_iterations * g_conf_thread_count,
+        .voluntary_switches = voluntary_switches,
+        .involuntary_switches = involuntary_switches,
     };
 
     pthread_barrier_destroy(&start_barrier);
@@ -629,20 +653,23 @@ static void print_contender_measurement(enum bench_lock lock_id, int run_positio
     const int count_matched = measurement->shared_count == measurement->expected_count;
 
     if (g_conf_output_format == OUTPUT_FORMAT_CSV) {
-        printf("%s,%d,%d,%d,%d,%.4f,%d,%.6f,%lld,%lld,%d,%.6f\n", g_contenders[lock_id].cli_key, run_position,
-               g_conf_thread_count, g_conf_iterations, g_conf_workload_nop_loops, g_measured_nop_ns,
-               prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), measurement->elapsed_ms, measurement->shared_count,
-               measurement->expected_count, count_matched, measurement->earliest_done_ms);
+        printf("%s,%d,%d,%d,%d,%.4f,%d,%.6f,%lld,%lld,%d,%.6f,%ld,%ld\n", g_contenders[lock_id].cli_key,
+               run_position, g_conf_thread_count, g_conf_iterations, g_conf_workload_nop_loops,
+               g_measured_nop_ns, prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), measurement->elapsed_ms,
+               measurement->shared_count, measurement->expected_count, count_matched, measurement->earliest_done_ms,
+               measurement->voluntary_switches, measurement->involuntary_switches);
         return;
     }
     printf("[ %-22s ]\n"
            "  - Elapsed Time : %10.3f ms\n"
            "  - Atomic Count : %10lld / %lld (%s)\n"
-           "  - Fairness     : min %10.3f ms, max %10.3f ms, min/max %.2f\n",
+           "  - Fairness     : min %10.3f ms, max %10.3f ms, min/max %.2f\n"
+           "  - Switches     : %ld involuntary, %ld voluntary\n",
            g_contenders[lock_id].display_name, measurement->elapsed_ms, measurement->shared_count,
            measurement->expected_count, count_matched ? "OK" : "FAIL",
            measurement->earliest_done_ms, measurement->elapsed_ms,
-           (measurement->elapsed_ms > 0.0) ? measurement->earliest_done_ms / measurement->elapsed_ms : 1.0);
+           (measurement->elapsed_ms > 0.0) ? measurement->earliest_done_ms / measurement->elapsed_ms : 1.0,
+           measurement->involuntary_switches, measurement->voluntary_switches);
 }
 
 /*
