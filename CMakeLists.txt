@@ -136,9 +136,10 @@ if(CTAGS_EXECUTABLE)
                  -f ${CMAKE_SOURCE_DIR}/tags ${LIB_SRCS} ${BENCH_SRCS} ${CHECK_SRCS} ${HDRS})
 endif()
 if(CSCOPE_EXECUTABLE)
+    string(JOIN " " CSCOPE_INDEXED_FILES ${LIB_SRCS} ${BENCH_SRCS} ${CHECK_SRCS} ${HDRS})
     list(APPEND INDEX_COMMANDS
          COMMAND ${CMAKE_COMMAND} -E echo ${LIB_SRCS} ${BENCH_SRCS} ${CHECK_SRCS} ${HDRS}
-         COMMAND sh -c "printf '%s\\n' ${LIB_SRCS} ${BENCH_SRCS} ${CHECK_SRCS} ${HDRS} > cscope.files && ${CSCOPE_EXECUTABLE} -b -q -k -i cscope.files")
+         COMMAND sh -c "printf '%s\\n' ${CSCOPE_INDEXED_FILES} > cscope.files && ${CSCOPE_EXECUTABLE} -b -q -k -i cscope.files")
 endif()
 
 add_custom_target(index
