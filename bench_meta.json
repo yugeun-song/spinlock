@@ -11,15 +11,15 @@
   "kernel": "7.2.14-arch1-1",
   "nop_ns": 0.1115,
   "timer_slack_ns": 50000,
-  "seed": 4132930083,
+  "seed": 1970620280,
   "repeats": 7,
   "repeats_max": 14,
   "noisy_cell_cv": 0.05,
   "warmup_launches": 3,
-  "launches_kept": 364,
+  "launches_kept": 378,
   "launches_rejected": 0,
-  "load_1min": {
-    "median": 3.86,
-    "max": 5.8
+  "runnable_tasks": {
+    "median": 0.0,
+    "max": 4.0
   }
 }
