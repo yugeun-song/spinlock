@@ -222,9 +222,8 @@ cscope: $(SRCS) $(HDRS)
 	    $(CSCOPE) -b -q -k -i $(CSCOPE_FILES) && echo "wrote $(CSCOPE_DB)"; \
 	else echo "cscope not found, skipping $(CSCOPE_DB)"; fi
 
-# Ask clangd itself to parse every file with the compilation database, as an
-# editor does, and print the errors it finds (clangd --check reports errors
-# only, not warnings). Exits non-zero on any error.
+# Parse every file with clangd and the compilation database, as an editor does.
+# clangd --check prints errors only; exits non-zero on any error.
 lsp-check: $(COMPDB)
 	@status=0; for src in $(SRCS) $(HDRS); do \
 	    echo "clangd --check=$$src"; \

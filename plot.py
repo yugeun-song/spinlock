@@ -14,10 +14,8 @@ Design notes / statistical choices:
     thread count yields a latency that is comparable across thread counts, so a
     rising line means genuine contention overhead, not just more work retired.
   * Central mark = median of the 7 runs (robust for right-skewed, floor-bounded
-    latency). Each lock's runs are drawn as a candle: the body spans the
-    interquartile range and the wicks reach the fastest and the slowest run, so
-    the spread stays visible without an error bar masquerading as a confidence
-    interval.
+    latency). Each lock's runs form a candle (body = interquartile range,
+    wicks = min/max), showing spread without an error bar posing as a CI.
   * Threads beyond the pinned core count are an oversubscribed regime (shaded)
     that hits every lock, not just MCS; disclosed rather than hidden.
   * Speedup heatmap cells whose ratio is not distinguishable from break-even
