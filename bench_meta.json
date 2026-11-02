@@ -8,7 +8,7 @@
     4,
     8
   ],
-  "kernel": "7.2.6-arch2-1",
+  "kernel": "7.2.14-arch1-1",
   "nop_ns": 0.1115,
   "timer_slack_ns": 50000
 }
