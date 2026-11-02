@@ -13,14 +13,14 @@ Design notes / statistical choices:
     value is multiplied by the thread count internally; dividing it back by the
     thread count yields a latency that is comparable across thread counts, so a
     rising line means genuine contention overhead, not just more work retired.
-  * Central mark = median of the 7 runs (robust for right-skewed, floor-bounded
+  * Central mark = median of the runs (robust for right-skewed, floor-bounded
     latency). Each lock's runs form a candle (body = interquartile range,
     wicks = min/max), showing spread without an error bar posing as a CI.
   * Threads beyond the pinned core count are an oversubscribed regime (shaded)
     that hits every lock, not just MCS; disclosed rather than hidden.
-  * Speedup heatmap cells whose ratio is not distinguishable from break-even
-    (bootstrap 95% CI of the median ratio crosses 1.0) are greyed and hatched
-    instead of being painted as a decisive winner.
+  * Heatmap ratios are medians of per-launch paired ratios. Cells that are not
+    significant at a 5% false discovery rate (paired bootstrap p-values,
+    Benjamini-Hochberg over both heatmaps) are greyed and hatched.
 """
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ SPEEDUP_CMAP = LinearSegmentedColormap.from_list(
 
 
 def load_csv(path: Path):
-    raw: dict[tuple[int, int, str], list[float]] = defaultdict(list)
+    raw: dict[tuple[int, int, str], dict[int, float]] = defaultdict(dict)
     workloads: set[int] = set()
     threads: set[int] = set()
     with path.open(newline="") as f:
@@ -90,7 +90,7 @@ def load_csv(path: Path):
             # ms/1M-ops, which numerically equals ns/op * thread_count. Divide it
             # back out so the y-axis is a true per-acquisition latency.
             ns_per_op = float(row["time_ms_normalized_to_1m_iters"]) / t
-            raw[(wl, t, lock)].append(ns_per_op)
+            raw[(wl, t, lock)][int(row["run_idx"])] = ns_per_op
             workloads.add(wl)
             threads.add(t)
     return raw, sorted(workloads), sorted(threads)
@@ -105,7 +105,7 @@ def load_meta(path: Path) -> dict:
 
 def cell(raw, wl, t, lock):
     v = raw.get((wl, t, lock))
-    return np.asarray(v, float) if v else None
+    return np.asarray(list(v.values()), float) if v else None
 
 
 # Pretendard (a bold humanist sans) matches the requested reference weight; fall
@@ -238,26 +238,34 @@ def draw_scaling_panel(ax, raw, wl, threads, ylim, cores, legend=False, nop_ns=N
 
 
 def speedup_matrix(raw, workloads, threads, numer, rng, nboot=2000):
-    """Ratio of medians numer/ttas per (workload, thread), plus a significance
-    mask from a bootstrap 95% CI of the ratio crossing break-even (1.0)."""
+    """Median of the per-launch ratios numer/ttas per (workload, thread), plus a
+    two-sided paired bootstrap p-value against break-even (1.0)."""
     M = np.full((len(workloads), len(threads)), np.nan)
-    sig = np.zeros_like(M, dtype=bool)
+    p_values = np.full_like(M, np.nan)
     for i, wl in enumerate(workloads):
         for j, t in enumerate(threads):
-            d = cell(raw, wl, t, "ttas")
-            n = cell(raw, wl, t, numer)
-            if d is None or n is None or d.size == 0 or n.size == 0:
+            numerator_runs = raw.get((wl, t, numer)) or {}
+            ttas_runs = raw.get((wl, t, "ttas")) or {}
+            shared_runs = sorted(set(numerator_runs) & set(ttas_runs))
+            if len(shared_runs) < 2:
                 continue
-            dm = float(np.median(d))
-            if dm <= 0:
-                continue
-            M[i, j] = float(np.median(n)) / dm
-            if d.size >= 2 and n.size >= 2:
-                rn = np.median(rng.choice(n, (nboot, n.size)), axis=1)
-                rd = np.median(rng.choice(d, (nboot, d.size)), axis=1)
-                lo, hi = np.percentile(rn / rd, [2.5, 97.5])
-                sig[i, j] = not (lo <= 1.0 <= hi)
-    return M, sig
+            log_ratios = np.log2([numerator_runs[run] / ttas_runs[run] for run in shared_runs])
+            M[i, j] = float(2.0 ** np.median(log_ratios))
+            boot = np.median(rng.choice(log_ratios, (nboot, log_ratios.size)), axis=1)
+            tail = min(float(np.mean(boot <= 0.0)), float(np.mean(boot >= 0.0)))
+            p_values[i, j] = min(1.0, 2.0 * max(tail, 1.0 / nboot))
+    return M, p_values
+
+
+def benjamini_hochberg(p_values, false_discovery_rate=0.05):
+    tested = np.isfinite(p_values)
+    sorted_p = np.sort(p_values[tested])
+    if sorted_p.size == 0:
+        return np.zeros(p_values.shape, dtype=bool)
+    thresholds = false_discovery_rate * np.arange(1, sorted_p.size + 1) / sorted_p.size
+    passing = sorted_p <= thresholds
+    cutoff = sorted_p[passing].max() if passing.any() else -1.0
+    return tested & (p_values <= cutoff)
 
 
 def heatmap_norm(*matrices):
@@ -357,8 +365,9 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
                     hi = max(hi, float(arr.max()))
     ylim = (lo / 1.7, hi * 1.9)
 
-    mp, sp = speedup_matrix(raw, workloads, threads, "pspin", rng)
-    mm, sm = speedup_matrix(raw, workloads, threads, "mcs", rng)
+    mp, pp = speedup_matrix(raw, workloads, threads, "pspin", rng)
+    mm, pm = speedup_matrix(raw, workloads, threads, "mcs", rng)
+    sp, sm = benjamini_hochberg(np.stack([pp, pm]))
     peak_p, peak_m, breakeven, base_ns = compute_headlines(
         raw, workloads, threads, mp, mm)
 
@@ -424,15 +433,15 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
         fontsize=17, fontweight="bold", color=INK, x=0.06, ha="left", y=0.983)
     subtitle_text = fig.text(
         0.06, 0.953,
-        "lock/unlock latency amortised across all threads · candle = 7 runs (body = interquartile "
+        "lock/unlock latency amortised across all threads · candle = all runs (body = interquartile "
         "range, wick = min–max), line = median · shaded = oversubscribed (threads > pinned cores)",
         ha="left", fontsize=12, color=INK_MUTED)
     footer_text = fig.text(
         0.06, 0.016,
         f"Pinning: {pin_desc}.  Critical section = N filler NOPs held under "
-        "the lock.  Ratio = ratio of elapsed-time medians; cells within a bootstrap 95% "
-        "CI of break-even are greyed.  MCS is skipped where it convoys under "
-        "oversubscription.",
+        "the lock.  Ratio = median of per-launch paired elapsed-time ratios; cells not significant "
+        "at 5% FDR (paired bootstrap, Benjamini-Hochberg) are greyed.  MCS is skipped where it "
+        "convoys under oversubscription.",
         ha="left", fontsize=8, color=INK_FAINT, style="italic")
     content_width = (gs.right - gs.left) * fig.bbox.width
     for text in (title_text, subtitle_text, footer_text):
