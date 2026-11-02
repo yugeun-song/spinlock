@@ -14,9 +14,10 @@ Design notes / statistical choices:
     thread count yields a latency that is comparable across thread counts, so a
     rising line means genuine contention overhead, not just more work retired.
   * Central mark = median of the 7 runs (robust for right-skewed, floor-bounded
-    latency); the 7 individual runs are shown as a jittered dot strip so the
-    sample size is self-evident (no error bar masquerading as a confidence
-    interval).
+    latency). Each lock's runs are drawn as a candle: the body spans the
+    interquartile range and the wicks reach the fastest and the slowest run, so
+    the spread stays visible without an error bar masquerading as a confidence
+    interval.
   * Threads beyond the pinned core count are an oversubscribed regime (shaded)
     that hits every lock, not just MCS; disclosed rather than hidden.
   * Speedup heatmap cells whose ratio is not distinguishable from break-even
@@ -63,6 +64,9 @@ COLOR = {"ttas": "#0ecb81", "mcs": "#f6465d", "pspin": "#3b82f6",
 MARKER = {"ttas": "o", "mcs": "s", "pspin": "^", "ttas_park": "D", "pmutex": "v"}
 NAME = {"ttas": "Custom TTAS", "mcs": "Custom MCS", "pspin": "POSIX Spinlock",
         "ttas_park": "Custom TTAS Spin+Park", "pmutex": "POSIX Mutex"}
+CANDLE_SPACING = 0.12
+CANDLE_WIDTH = 0.085
+TILE_INSET = 0.08
 
 # Diverging map for the speedup heatmaps: trading-down red (TTAS slower) ↔ neutral
 # panel ↔ trading-up green (TTAS faster), so speedup reads with the up/down
@@ -133,6 +137,19 @@ def apply_theme():
     })
 
 
+def shrink_to_fit(text, renderer, max_width=None, max_height=None, min_fontsize=6.0):
+    fontsize = text.get_fontsize()
+    while fontsize > min_fontsize:
+        extent = text.get_window_extent(renderer=renderer)
+        fits_width = max_width is None or extent.width <= max_width
+        fits_height = max_height is None or extent.height <= max_height
+        if fits_width and fits_height:
+            break
+        fontsize = round(fontsize - 0.25, 2)
+        text.set_fontsize(fontsize)
+    return fontsize
+
+
 def _panel_frame(ax):
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
@@ -151,7 +168,7 @@ def draw_stat_tile(ax, value, unit, label, color):
     ax.set_yticks([])
     for s in ax.spines.values():
         s.set_visible(False)
-    x0 = 0.08  # shared left edge for the number, its unit, and the label
+    x0 = TILE_INSET  # shared left edge for the number, its unit, and the label
     val_t = ax.text(x0, 0.60, value, transform=ax.transAxes, ha="left",
                     va="center", fontsize=26, fontfamily=FONT_HEAVY, color=color)
     if unit:
@@ -162,12 +179,11 @@ def draw_stat_tile(ax, value, unit, label, color):
             (val_t.get_window_extent(renderer=rend).x1, 0.0))[0]
         ax.text(x_right + 0.03, 0.555, unit, transform=ax.transAxes, ha="left",
                 va="center", fontsize=12, color=INK_MUTED)
-    ax.text(x0, 0.27, label, transform=ax.transAxes, ha="left", va="center",
-            fontsize=10, color=INK_MUTED)
+    return ax.text(x0, 0.27, label, transform=ax.transAxes, ha="left", va="center",
+                   fontsize=10, color=INK_MUTED)
 
 
-def draw_scaling_panel(ax, raw, wl, threads, ylim, cores, rng, legend=False,
-                       nop_ns=None):
+def draw_scaling_panel(ax, raw, wl, threads, ylim, cores, legend=False, nop_ns=None):
     _panel_frame(ax)
     xpos = list(range(len(threads)))
 
@@ -182,9 +198,11 @@ def draw_scaling_panel(ax, raw, wl, threads, ylim, cores, rng, legend=False,
                     fontsize=7.0, ha="left", va="top", style="italic", zorder=6,
                     alpha=0.8)
 
-    for lock in LOCKS:
+    for lock_index, lock in enumerate(LOCKS):
         # NaN at missing thread counts so the line breaks at any gap (interior or
         # tail) instead of bridging a straight segment across an absent point.
+        offset = (lock_index - (len(LOCKS) - 1) / 2) * CANDLE_SPACING
+        positions = [j + offset for j in range(len(threads))]
         meds = []
         any_pt = False
         for j, t in enumerate(threads):
@@ -193,15 +211,16 @@ def draw_scaling_panel(ax, raw, wl, threads, ylim, cores, rng, legend=False,
                 meds.append(np.nan)
                 continue
             any_pt = True
-            meds.append(float(np.median(arr)))
-            # Individual runs as a faint jittered strip so n is self-evident.
-            jit = (rng.random(arr.size) - 0.5) * 0.16
-            ax.scatter(np.full(arr.size, j) + jit, arr, s=9, color=COLOR[lock],
-                       alpha=0.35, edgecolors="none", zorder=3)
+            low, q1, med, q3, high = np.percentile(arr, [0, 25, 50, 75, 100])
+            meds.append(float(med))
+            ax.vlines(positions[j], low, high, color=COLOR[lock], lw=1.2, alpha=0.95, zorder=3)
+            ax.add_patch(plt.Rectangle((positions[j] - CANDLE_WIDTH / 2, q1), CANDLE_WIDTH,
+                                       max(q3 - q1, q1 * 0.002), facecolor=COLOR[lock],
+                                       edgecolor=COLOR[lock], lw=0.8, alpha=0.7, zorder=4))
         if not any_pt:
             continue
-        ax.plot(range(len(threads)), meds, color=COLOR[lock], marker=MARKER[lock],
-                ms=6.5, mec=PANEL_BG, mew=0.8, lw=2.2, zorder=5,
+        ax.plot(positions, meds, color=COLOR[lock], marker=MARKER[lock],
+                ms=3.8, mec=PANEL_BG, mew=0.5, lw=1.4, zorder=5,
                 label=NAME[lock] if legend else None)
 
     ax.set_yscale("log")
@@ -365,14 +384,22 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
         (f"{base_ns:.1f}", "ns", "TTAS cost, 1 thread", INK),
         (f"{cores}", "cores", "Pinned P-cores", INK_MUTED),
     ]
+    renderer = fig.canvas.get_renderer()
+    tile_labels = []
     for k, (val, unit, label, col) in enumerate(tiles):
-        draw_stat_tile(fig.add_subplot(tile_gs[0, k]), val, unit, label, col)
+        tile_ax = fig.add_subplot(tile_gs[0, k])
+        tile_labels.append((tile_ax, draw_stat_tile(tile_ax, val, unit, label, col)))
+    label_fontsize = min(
+        shrink_to_fit(text, renderer,
+                      max_width=tile_ax.get_window_extent(renderer).width * (1 - 2 * TILE_INSET))
+        for tile_ax, text in tile_labels)
+    for _, text in tile_labels:
+        text.set_fontsize(label_fontsize)
 
     # --- Scaling panels -------------------------------------------------------
     for i, wl in enumerate(workloads):
         ax = fig.add_subplot(gs[1 + i // ncol, i % ncol])
-        draw_scaling_panel(ax, raw, wl, threads, ylim, cores, rng,
-                           legend=(i == 0), nop_ns=nop_ns)
+        draw_scaling_panel(ax, raw, wl, threads, ylim, cores, legend=(i == 0), nop_ns=nop_ns)
         if i % ncol == 0:
             ax.set_ylabel("ns / lock-unlock  (log)", color=INK_MUTED)
         if i // ncol == nrow_panels - 1:
@@ -389,23 +416,29 @@ def render(csv_path=DEFAULT_CSV, png_path=DEFAULT_PNG, cpu_model=None,
     cb = fig.colorbar(im, ax=[axh1, axh2], fraction=0.03, pad=0.02)
     cb.set_label("log2(elapsed ratio) · 0 = break-even · grey = within run-to-run noise",
                  color=INK_MUTED, fontsize=8.5)
+    shrink_to_fit(cb.ax.yaxis.label, renderer, max_height=cb.ax.get_window_extent(renderer).height)
     cb.ax.yaxis.set_tick_params(color=INK_MUTED)
     plt.setp(cb.ax.get_yticklabels(), color=INK_MUTED)
     cb.outline.set_edgecolor(PANEL_EDGE)
 
-    fig.suptitle(f"Custom TTAS / TTAS Spin+Park / MCS vs POSIX Spinlock / Mutex   —   {cpu}",
-                 fontsize=17, fontweight="bold", color=INK, x=0.06, ha="left",
-                 y=0.983)
-    fig.text(0.06, 0.953,
-             "lock/unlock latency amortised across all threads · dots = 7 runs, "
-             "line = median · shaded = oversubscribed (threads > pinned cores)",
-             ha="left", fontsize=12, color=INK_MUTED)
-    fig.text(0.06, 0.016,
-             f"Pinning: {pin_desc}.  Critical section = N filler NOPs held under "
-             "the lock.  Ratio = ratio of elapsed-time medians; cells within a bootstrap 95% "
-             "CI of break-even are greyed.  MCS is skipped where it convoys under "
-             "oversubscription.",
-             ha="left", fontsize=8, color=INK_FAINT, style="italic")
+    title_text = fig.suptitle(
+        f"Custom TTAS / TTAS Spin+Park / MCS vs POSIX Spinlock / Mutex   —   {cpu}",
+        fontsize=17, fontweight="bold", color=INK, x=0.06, ha="left", y=0.983)
+    subtitle_text = fig.text(
+        0.06, 0.953,
+        "lock/unlock latency amortised across all threads · candle = 7 runs (body = interquartile "
+        "range, wick = min–max), line = median · shaded = oversubscribed (threads > pinned cores)",
+        ha="left", fontsize=12, color=INK_MUTED)
+    footer_text = fig.text(
+        0.06, 0.016,
+        f"Pinning: {pin_desc}.  Critical section = N filler NOPs held under "
+        "the lock.  Ratio = ratio of elapsed-time medians; cells within a bootstrap 95% "
+        "CI of break-even are greyed.  MCS is skipped where it convoys under "
+        "oversubscription.",
+        ha="left", fontsize=8, color=INK_FAINT, style="italic")
+    content_width = (gs.right - gs.left) * fig.bbox.width
+    for text in (title_text, subtitle_text, footer_text):
+        shrink_to_fit(text, renderer, max_width=content_width)
 
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
