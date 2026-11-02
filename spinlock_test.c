@@ -17,12 +17,15 @@
 #include <sys/prctl.h>
 
 /*
- * Which contenders to run (-K). Defaults to all five, measured in table order
- * with MCS last: a strict FIFO queue lock convoys when threads oversubscribe
- * the cores (a preempted successor stalls the whole queue), so its slow run
- * cannot delay the others' already-flushed output.
+ * Contenders accepted by -K, which also sets the run order. The default is this
+ * table order with MCS last: a strict FIFO queue lock convoys when threads
+ * oversubscribe the cores, so its slow run cannot delay the others' output.
  */
 #define CONTENDER_KEY_LIST "ttas,ttas_park,pspin,pmutex,mcs"
+#define MEASUREMENT_CSV_HEADER                                                                     \
+    "lock,run_position,threads,iterations,workload_nops,nop_ns,timer_slack_ns,elapsed_ms,shared_"  \
+    "count,"                                                                                       \
+    "expected_count,count_ok,earliest_done_ms"
 
 /*
  * Cache-line-isolated wrapper for the POSIX spinlock. pthread_spinlock_t is a
@@ -68,6 +71,18 @@ struct nop_calibration {
     double nanoseconds_per_loop;
 };
 
+struct contender_measurement {
+    double elapsed_ms;
+    double earliest_done_ms;
+    long long shared_count;
+    long long expected_count;
+};
+
+enum output_format {
+    OUTPUT_FORMAT_TEXT,
+    OUTPUT_FORMAT_CSV,
+};
+
 static int g_conf_iterations = DEFAULT_ITERATIONS;
 static int g_conf_workload_nop_loops = DEFAULT_WORKLOAD_NOP_LOOPS;
 static int g_conf_thread_count = DEFAULT_THREAD_COUNT;
@@ -77,6 +92,12 @@ static long g_detected_cache_line_size = 0;
 static double g_measured_nop_ns = 0.0;
 static const char *g_memory_lock_status = "unavailable";
 static int g_affinity_warning_printed = 0;
+static enum output_format g_conf_output_format = OUTPUT_FORMAT_TEXT;
+static enum bench_lock g_contender_run_order[BENCH_LOCK_COUNT] = {
+    BENCH_LOCK_TTAS,        BENCH_LOCK_TTAS_PARK, BENCH_LOCK_POSIX_SPINLOCK,
+    BENCH_LOCK_POSIX_MUTEX, BENCH_LOCK_MCS,
+};
+static int g_contender_run_count = BENCH_LOCK_COUNT;
 
 /*
  * Optional CPU pin set parsed from -C (e.g. "0-3" or "0,2,4"). When set, worker
@@ -278,12 +299,12 @@ static void parse_contender_list(const char *argument_text)
     const char *cursor = argument_text;
     const char *next_comma;
     size_t token_length;
-    int selected_any = 0;
     int contender_index;
 
     for (contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
         g_contenders[contender_index].is_selected = 0;
     }
+    g_contender_run_count = 0;
 
     while (*cursor) {
         next_comma = strchr(cursor, ',');
@@ -291,8 +312,6 @@ static void parse_contender_list(const char *argument_text)
         for (contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
             const char *cli_key = g_contenders[contender_index].cli_key;
             if (token_length == strlen(cli_key) && strncmp(cursor, cli_key, token_length) == 0) {
-                g_contenders[contender_index].is_selected = 1;
-                selected_any = 1;
                 break;
             }
         }
@@ -301,13 +320,20 @@ static void parse_contender_list(const char *argument_text)
                     (int)token_length, cursor);
             exit(EXIT_FAILURE);
         }
+        if (g_contenders[contender_index].is_selected) {
+            fprintf(stderr, "Error: Lock '%.*s' listed twice in -K\n", (int)token_length, cursor);
+            exit(EXIT_FAILURE);
+        }
+        g_contenders[contender_index].is_selected = 1;
+        g_contender_run_order[g_contender_run_count] = (enum bench_lock)contender_index;
+        ++g_contender_run_count;
         if (!next_comma) {
             break;
         }
         cursor = next_comma + 1;
     }
 
-    if (!selected_any) {
+    if (g_contender_run_count == 0) {
         fprintf(stderr, "Error: -K selected no locks\n");
         exit(EXIT_FAILURE);
     }
@@ -433,10 +459,11 @@ static inline void print_usage(const char *program_name)
             "  -C <cpulist>    Pin workers to these cores round-robin, e.g. 0-3 or 0,2,4\n"
             "                  (deterministic placement; pass >= as many cores as threads\n"
             "                  from one homogeneous class to control P/E-core variance)\n"
-            "  -K <locks>      Which contenders to run, comma-separated subset of\n"
+            "  -K <locks>      Contenders to run, in this order, comma-separated subset of\n"
             "                  " CONTENDER_KEY_LIST " (default: all five)\n"
             "  -S <ns>         Timer slack via prctl(PR_SET_TIMERSLACK); it stretches every\n"
             "                  nanosleep of ttas_park (0 restores the kernel default)\n"
+            "  -F <format>     Output format: text (default) or csv, one row per contender\n"
             "  -h              Show this help and exit\n",
             program_name, MIN_THREAD_COUNT, MAX_THREAD_COUNT, DEFAULT_THREAD_COUNT, MIN_ITERATIONS,
             MAX_ITERATIONS, DEFAULT_ITERATIONS, MIN_WORKLOAD_NOP_LOOPS, MAX_WORKLOAD_NOP_LOOPS,
@@ -471,6 +498,18 @@ static int parse_bounded_int(const char *argument_text, int minimum, int maximum
     return (int)parsed_value;
 }
 
+static enum output_format parse_output_format(const char *argument_text)
+{
+    if (strcmp(argument_text, "text") == 0) {
+        return OUTPUT_FORMAT_TEXT;
+    }
+    if (strcmp(argument_text, "csv") == 0) {
+        return OUTPUT_FORMAT_CSV;
+    }
+    fprintf(stderr, "Error: Unknown output format '%s' (use text or csv)\n", argument_text);
+    exit(EXIT_FAILURE);
+}
+
 static void sleep_settle_gap(void)
 {
     const struct timespec settle_duration = {
@@ -480,7 +519,7 @@ static void sleep_settle_gap(void)
     nanosleep(&settle_duration, NULL);
 }
 
-static double run_contender(const char *display_name, void *(*worker_routine)(void *))
+static struct contender_measurement run_contender(void *(*worker_routine)(void *), int is_measured_pass)
 {
     isolated_posix_spinlock_t isolated_posix_spinlock;
     isolated_posix_mutex_t isolated_posix_mutex;
@@ -488,13 +527,11 @@ static double run_contender(const char *display_name, void *(*worker_routine)(vo
     spinlock_mcs_t mcs_lock;
     pthread_barrier_t start_barrier;
     struct worker_context context_template;
-    struct timespec suite_begin_time;
-    struct timespec suite_end_time;
     long long shared_counter = 0;
     double earliest_done_ms = 1e300;
     double latest_done_ms = 0.0;
 
-    if (display_name) {
+    if (is_measured_pass) {
         sleep_settle_gap();
     }
 
@@ -551,15 +588,10 @@ static double run_contender(const char *display_name, void *(*worker_routine)(vo
     }
 
     pthread_barrier_wait(&start_barrier);
-    clock_gettime(CLOCK_MONOTONIC, &suite_begin_time);
 
     for (int worker_index = 0; worker_index < g_conf_thread_count; ++worker_index) {
         pthread_join(worker_threads[worker_index], NULL);
     }
-
-    clock_gettime(CLOCK_MONOTONIC, &suite_end_time);
-    const double elapsed_ms = elapsed_milliseconds_between(&suite_begin_time, &suite_end_time);
-    const long long expected_count = (long long)g_conf_iterations * g_conf_thread_count;
 
     struct timespec earliest_begin_time = worker_contexts[0].loop_begin_time;
     for (int worker_index = 1; worker_index < g_conf_thread_count; ++worker_index) {
@@ -575,15 +607,12 @@ static double run_contender(const char *display_name, void *(*worker_routine)(vo
         latest_done_ms = (done_ms > latest_done_ms) ? done_ms : latest_done_ms;
     }
 
-    if (display_name) {
-        const char *count_status = (shared_counter == expected_count) ? "OK" : "FAIL";
-        printf("[ %-22s ]\n"
-               "  - Elapsed Time : %10.3f ms\n"
-               "  - Atomic Count : %10lld / %lld (%s)\n"
-               "  - Fairness     : min %10.3f ms, max %10.3f ms, min/max %.2f\n",
-               display_name, elapsed_ms, shared_counter, expected_count, count_status, earliest_done_ms,
-               latest_done_ms, (latest_done_ms > 0.0) ? earliest_done_ms / latest_done_ms : 1.0);
-    }
+    const struct contender_measurement measurement = {
+        .elapsed_ms = latest_done_ms,
+        .earliest_done_ms = earliest_done_ms,
+        .shared_count = shared_counter,
+        .expected_count = (long long)g_conf_iterations * g_conf_thread_count,
+    };
 
     pthread_barrier_destroy(&start_barrier);
     pthread_spin_destroy(&isolated_posix_spinlock.lock);
@@ -591,7 +620,29 @@ static double run_contender(const char *display_name, void *(*worker_routine)(vo
     free(worker_threads);
     free(worker_contexts);
 
-    return elapsed_ms;
+    return measurement;
+}
+
+static void print_contender_measurement(enum bench_lock lock_id, int run_position,
+                                        const struct contender_measurement *measurement)
+{
+    const int count_matched = measurement->shared_count == measurement->expected_count;
+
+    if (g_conf_output_format == OUTPUT_FORMAT_CSV) {
+        printf("%s,%d,%d,%d,%d,%.4f,%d,%.6f,%lld,%lld,%d,%.6f\n", g_contenders[lock_id].cli_key, run_position,
+               g_conf_thread_count, g_conf_iterations, g_conf_workload_nop_loops, g_measured_nop_ns,
+               prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), measurement->elapsed_ms, measurement->shared_count,
+               measurement->expected_count, count_matched, measurement->earliest_done_ms);
+        return;
+    }
+    printf("[ %-22s ]\n"
+           "  - Elapsed Time : %10.3f ms\n"
+           "  - Atomic Count : %10lld / %lld (%s)\n"
+           "  - Fairness     : min %10.3f ms, max %10.3f ms, min/max %.2f\n",
+           g_contenders[lock_id].display_name, measurement->elapsed_ms, measurement->shared_count,
+           measurement->expected_count, count_matched ? "OK" : "FAIL",
+           measurement->earliest_done_ms, measurement->elapsed_ms,
+           (measurement->elapsed_ms > 0.0) ? measurement->earliest_done_ms / measurement->elapsed_ms : 1.0);
 }
 
 /*
@@ -607,7 +658,7 @@ static void run_warmup_pass(void *(*worker_routine)(void *))
     const int warmup_iterations = configured_iterations / 10;
 
     g_conf_iterations = (warmup_iterations > 0) ? warmup_iterations : 1;
-    run_contender(NULL, worker_routine);
+    run_contender(worker_routine, 0);
     g_conf_iterations = configured_iterations;
 }
 
@@ -644,7 +695,7 @@ void bench_parse_args(int argc, char *argv[])
     }
 
     int option_char;
-    while ((option_char = getopt(argc, argv, "+t:i:l:m:M:C:K:S:")) != -1) {
+    while ((option_char = getopt(argc, argv, "+t:i:l:m:M:C:K:S:F:")) != -1) {
         switch (option_char) {
         case 't':
             g_conf_thread_count = parse_bounded_int(optarg, MIN_THREAD_COUNT, MAX_THREAD_COUNT, "threads");
@@ -671,9 +722,12 @@ void bench_parse_args(int argc, char *argv[])
         case 'S':
             g_conf_timerslack_ns = parse_bounded_int(optarg, 0, INT_MAX, "timer_slack");
             break;
+        case 'F':
+            g_conf_output_format = parse_output_format(optarg);
+            break;
         case '?':
             if (optopt == 't' || optopt == 'i' || optopt == 'l' || optopt == 'm' || optopt == 'M' ||
-                optopt == 'C' || optopt == 'K' || optopt == 'S') {
+                optopt == 'C' || optopt == 'K' || optopt == 'S' || optopt == 'F') {
                 fprintf(stderr, "Error: Option '-%c' requires an argument.\n", optopt);
             } else {
                 fprintf(stderr, "Error: Unknown option '-%c'.\n", optopt);
@@ -744,6 +798,10 @@ void bench_calibrate(void)
 void bench_print_config(void)
 {
     char pinning_description[128];
+    if (g_conf_output_format == OUTPUT_FORMAT_CSV) {
+        puts(MEASUREMENT_CSV_HEADER);
+        return;
+    }
     if (g_conf_pinned_cpu_count > 0) {
         int written_length = snprintf(pinning_description, sizeof(pinning_description), "cpus");
         for (int cpu_index = 0;
@@ -779,32 +837,34 @@ void bench_print_config(void)
 
 void bench_warmup_all(void)
 {
-    for (int contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
-        if (g_contenders[contender_index].is_selected) {
-            run_warmup_pass(g_contenders[contender_index].worker_routine);
-        }
+    for (int run_position = 0; run_position < g_contender_run_count; ++run_position) {
+        run_warmup_pass(g_contenders[g_contender_run_order[run_position]].worker_routine);
     }
 }
 
 void bench_run_all(struct bench_results *results)
 {
-    int printed_any = 0;
-
     if (!results) {
         return;
     }
 
+    results->failed_atomic_count_checks = 0;
     for (int contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
         results->elapsed_ms[contender_index] = -1.0;
-        if (!g_contenders[contender_index].is_selected) {
-            continue;
-        }
-        if (printed_any) {
+    }
+
+    for (int run_position = 0; run_position < g_contender_run_count; ++run_position) {
+        const enum bench_lock lock_id = g_contender_run_order[run_position];
+        if (run_position > 0 && g_conf_output_format == OUTPUT_FORMAT_TEXT) {
             printf("\n");
         }
-        results->elapsed_ms[contender_index] = run_contender(
-            g_contenders[contender_index].display_name, g_contenders[contender_index].worker_routine);
-        printed_any = 1;
+        const struct contender_measurement measurement =
+            run_contender(g_contenders[lock_id].worker_routine, 1);
+        print_contender_measurement(lock_id, run_position, &measurement);
+        results->elapsed_ms[lock_id] = measurement.elapsed_ms;
+        if (measurement.shared_count != measurement.expected_count) {
+            ++results->failed_atomic_count_checks;
+        }
     }
 }
 
@@ -817,7 +877,7 @@ void bench_print_summary(const struct bench_results *results)
     const char *winner_name = NULL;
     double best_ms = 1e300;
 
-    if (!results) {
+    if (!results || g_conf_output_format == OUTPUT_FORMAT_CSV) {
         return;
     }
 

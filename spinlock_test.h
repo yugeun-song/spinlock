@@ -40,6 +40,7 @@ enum bench_lock {
 
 struct bench_results {
     double elapsed_ms[BENCH_LOCK_COUNT];
+    int failed_atomic_count_checks;
 };
 
 void bench_detect_topology(void);

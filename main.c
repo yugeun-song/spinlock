@@ -21,5 +21,5 @@ int main(int argc, char *argv[])
 
     bench_cleanup();
 
-    return EXIT_SUCCESS;
+    return (benchmark_results.failed_atomic_count_checks == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
