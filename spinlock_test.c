@@ -17,6 +17,14 @@
 #include <sys/prctl.h>
 
 /*
+ * Which contenders to run (-K). Defaults to all five, measured in table order
+ * with MCS last: a strict FIFO queue lock convoys when threads oversubscribe
+ * the cores (a preempted successor stalls the whole queue), so its slow run
+ * cannot delay the others' already-flushed output.
+ */
+#define CONTENDER_KEY_LIST "ttas,ttas_park,pspin,pmutex,mcs"
+
+/*
  * Cache-line-isolated wrapper for the POSIX spinlock. pthread_spinlock_t is a
  * bare word, whereas our custom spinlock_ttas_t is padded to its own cache line. To
  * compare the two locks fairly, the POSIX lock must get the same isolation:
@@ -256,14 +264,6 @@ static void *calibration_routine_nop(void *raw_calibration)
     calibration->nanoseconds_per_loop = best_pass_ms * 1e6 / calibration->loop_count;
     return NULL;
 }
-
-/*
- * Which contenders to run (-K). Defaults to all five, measured in table order
- * with MCS last: a strict FIFO queue lock convoys when threads oversubscribe
- * the cores (a preempted successor stalls the whole queue), so its slow run
- * cannot delay the others' already-flushed output.
- */
-#define CONTENDER_KEY_LIST "ttas,ttas_park,pspin,pmutex,mcs"
 
 static struct contender g_contenders[BENCH_LOCK_COUNT] = {
     [BENCH_LOCK_TTAS] = {"ttas", "Custom TTAS Spinlock", "Custom TTAS", worker_routine_ttas, 1},

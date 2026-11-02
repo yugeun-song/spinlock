@@ -52,9 +52,6 @@
 #define SPINLOCK_DEFAULT_SPIN_MIN 4
 #define SPINLOCK_DEFAULT_SPIN_MAX 16000
 
-extern int g_conf_spin_min;
-extern int g_conf_spin_max;
-
 typedef int spinlock_word_t;
 
 /*
@@ -101,6 +98,22 @@ typedef struct {
     mcs_node_t *volatile queue_tail;
     char cache_line_padding[CACHE_LINE_SIZE - sizeof(mcs_node_t *)];
 } __attribute__((aligned(CACHE_LINE_SIZE))) spinlock_mcs_t;
+
+extern int g_conf_spin_min;
+extern int g_conf_spin_max;
+
+/*
+ * Per-thread node behind the single-argument spin_lock_mcs / spin_unlock_mcs
+ * wrappers, defined once in spinlock.c so every translation unit shares the
+ * same thread-local record: a lock taken through the wrapper in one file may be
+ * released in another. The wrapper still cannot nest, because one node can sit
+ * in only one queue at a time; spin_lock_mcs_node / spin_unlock_mcs_node take
+ * the node explicitly and have no such limit. The in-use flag is only read and
+ * written under SPINLOCK_DEBUG, where it turns a nested wrapper call into an
+ * abort instead of a corrupted queue.
+ */
+extern __thread mcs_node_t spin_mcs_thread_local_node;
+extern __thread int spin_mcs_thread_local_node_in_use;
 
 /*
  * Architecture spin-wait hint. Maps to the platform's pause primitive
@@ -417,19 +430,6 @@ static inline void mcs_store_release_flag(volatile spinlock_word_t *flag_slot, s
                  : "memory");
 #endif
 }
-
-/*
- * Per-thread node behind the single-argument spin_lock_mcs / spin_unlock_mcs
- * wrappers, defined once in spinlock.c so every translation unit shares the
- * same thread-local record: a lock taken through the wrapper in one file may be
- * released in another. The wrapper still cannot nest, because one node can sit
- * in only one queue at a time; spin_lock_mcs_node / spin_unlock_mcs_node take
- * the node explicitly and have no such limit. The in-use flag is only read and
- * written under SPINLOCK_DEBUG, where it turns a nested wrapper call into an
- * abort instead of a corrupted queue.
- */
-extern __thread mcs_node_t spin_mcs_thread_local_node;
-extern __thread int spin_mcs_thread_local_node_in_use;
 
 static inline void spin_init_mcs(spinlock_mcs_t *lock)
 {

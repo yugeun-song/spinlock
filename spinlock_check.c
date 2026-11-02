@@ -9,33 +9,18 @@
 #include <string.h>
 #include <unistd.h>
 
+#if defined(SPINLOCK_DEBUG)
+#include <fcntl.h>
+#include <signal.h>
+
+#include <sys/wait.h>
+#endif
+
 #define CHECK_MAX_THREAD_COUNT 8
 #define CHECK_MIN_THREAD_COUNT 2
 #define CHECK_ITERATIONS_PER_THREAD 100000
 #define CHECK_HOLD_PAUSE_COUNT 16
 #define CHECK_PARK_FORCING_SPIN_MAX 8
-
-static int g_failed_check_count = 0;
-static int g_passed_check_count = 0;
-static int g_check_thread_count = CHECK_MAX_THREAD_COUNT;
-static int g_check_iterations_per_thread = CHECK_ITERATIONS_PER_THREAD;
-
-static void report_pass(const char *check_name)
-{
-    ++g_passed_check_count;
-    printf("[PASS] %s\n", check_name);
-}
-
-static void report_fail(const char *check_name, const char *detail)
-{
-    ++g_failed_check_count;
-    printf("[FAIL] %s: %s\n", check_name, detail);
-}
-
-static void __attribute__((unused)) report_skip(const char *check_name, const char *reason)
-{
-    printf("[SKIP] %s: %s\n", check_name, reason);
-}
 
 struct contended_lock_pair {
     spinlock_ttas_t ttas_lock;
@@ -59,6 +44,36 @@ struct contended_worker_args {
     void (*acquire)(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b);
     void (*release)(struct contended_lock_pair *locks, mcs_node_t *node_a, mcs_node_t *node_b);
 };
+
+#if defined(SPINLOCK_DEBUG)
+enum misuse_kind {
+    MISUSE_TTAS_UNLOCK_NOT_HELD,
+    MISUSE_MCS_UNLOCK_EMPTY_QUEUE,
+    MISUSE_MCS_WRAPPER_NESTED
+};
+#endif
+
+static int g_failed_check_count = 0;
+static int g_passed_check_count = 0;
+static int g_check_thread_count = CHECK_MAX_THREAD_COUNT;
+static int g_check_iterations_per_thread = CHECK_ITERATIONS_PER_THREAD;
+
+static void report_pass(const char *check_name)
+{
+    ++g_passed_check_count;
+    printf("[PASS] %s\n", check_name);
+}
+
+static void report_fail(const char *check_name, const char *detail)
+{
+    ++g_failed_check_count;
+    printf("[FAIL] %s: %s\n", check_name, detail);
+}
+
+static void __attribute__((unused)) report_skip(const char *check_name, const char *reason)
+{
+    printf("[SKIP] %s: %s\n", check_name, reason);
+}
 
 static void probe_enter_critical_section(struct overlap_probe *probe)
 {
@@ -496,17 +511,6 @@ static void check_ttas_park_contended(void)
 }
 
 #if defined(SPINLOCK_DEBUG)
-#include <fcntl.h>
-#include <signal.h>
-
-#include <sys/wait.h>
-
-enum misuse_kind {
-    MISUSE_TTAS_UNLOCK_NOT_HELD,
-    MISUSE_MCS_UNLOCK_EMPTY_QUEUE,
-    MISUSE_MCS_WRAPPER_NESTED
-};
-
 static void perform_misuse(enum misuse_kind kind)
 {
     spinlock_ttas_t ttas_lock;
