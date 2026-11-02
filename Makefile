@@ -105,6 +105,8 @@ DEBUG_CHECK_COMMAND = $(CC) $(DEBUG_CFLAGS) $(LIB_SRCS) $(CHECK_SRCS) -o $(DEBUG
 SANITIZE_CHECK_COMMAND = $(CC) $(SANITIZE_CFLAGS) $(LIB_SRCS) $(CHECK_SRCS) -o $(SANITIZE_CHECK) \
                          $(SANITIZE_LDFLAGS) $(LDLIBS)
 
+BENCH_SMOKE_ARGUMENTS := -t 4 -l 0 -i 50000
+
 ifneq (,$(filter all,$(or $(MAKECMDGOALS),all)))
 SANITIZER_LINK_SUPPORTED := $(shell probe_output=$$(mktemp) || exit 0; \
     printf 'int main(void) { return 0; }\n' | \
@@ -167,7 +169,18 @@ $(BENCH_BINARIES) $(CHECK_BINARIES):
 check: $(RELEASE_CHECK) $(DEBUG_CHECK) $(RELEASE_BENCH)
 	./$(RELEASE_CHECK)
 	./$(DEBUG_CHECK)
-	./$(RELEASE_BENCH) -t 4 -l 0 -i 50000 | grep -E "Atomic Count" | grep -v OK && exit 1 || true
+	@echo "./$(RELEASE_BENCH) $(BENCH_SMOKE_ARGUMENTS)"
+	@bench_output=$$(./$(RELEASE_BENCH) $(BENCH_SMOKE_ARGUMENTS)); bench_status=$$?; \
+	atomic_count_lines=$$(printf '%s\n' "$$bench_output" | grep -c 'Atomic Count'); \
+	atomic_count_ok_lines=$$(printf '%s\n' "$$bench_output" | grep -c 'Atomic Count.*(OK)$$'); \
+	if [ $$bench_status -ne 0 ] || [ $$atomic_count_lines -eq 0 ] || \
+	   [ $$atomic_count_ok_lines -ne $$atomic_count_lines ]; then \
+	    printf '%s\n' "$$bench_output"; \
+	    echo "benchmark smoke run failed: exit status $$bench_status," \
+	         "$$atomic_count_ok_lines of $$atomic_count_lines atomic counts OK"; \
+	    exit 1; \
+	fi; \
+	echo "benchmark smoke run passed: $$atomic_count_ok_lines of $$atomic_count_lines atomic counts OK"
 
 sanitize: $(SANITIZE_CHECK)
 	ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 ./$(SANITIZE_CHECK)
