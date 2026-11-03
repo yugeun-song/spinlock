@@ -237,7 +237,7 @@ The release build (`./bin/<arch>-linux-gcc/release/spinlock_test`, or whatever `
 ## Benchmark Results
 *Test environment: Intel Core Ultra 5 226V (4 P-cores @ 4.5 GHz + 4 E-cores @ 3.5 GHz), Arch Linux, kernel `7.2.14-arch1-1`, GCC 16.2.1 release build (`-O3`), default timer slack 50,000 ns (`/proc/self/timerslack_ns`). Workers pinned to the four P-cores (`-C 0-3`). Each number is the median over 5 launches (3 for the longer critical section), each launch the geometric mean of 4 placement pages (`-P 0-3`), 1,000,000 iterations per thread and `-o 0` unless stated. `ns/acq` is elapsed time divided by the total number of acquisitions, and `min/max` is the median ratio of the earliest to the latest thread completion. The measured NOP cost is 0.111 ns.*
 
-**What the harness rewards.** Each thread performs a fixed number of acquisitions and the elapsed time is the wall time until the *last* thread finishes; there is no fairness term. On the same four cores a contended hand-off costs every lock about the same, because the lock word (or the MCS flag) has to move between cores: ≈ 85–105 ns per acquisition here for the POSIX spinlock, the POSIX mutex and MCS. A lock that finishes several times sooner is doing different work: its waiters stay away from the lock while one thread re-acquires uncontended at ≈ 9 ns. The `min/max` column exposes it; `1.00` means the lock was handed around evenly, `0.4–0.6` means one thread ran through while the others waited.
+**What the harness rewards.** Each thread performs a fixed number of acquisitions and the elapsed time is the wall time until the *last* thread finishes; there is no fairness term. On the same four cores a contended hand-off costs every lock about the same, because the lock word (or the MCS flag) has to move between cores: ≈ 85–105 ns per acquisition here for the POSIX spinlock, the POSIX mutex and MCS. A lock that finishes several times sooner is doing different work: its waiters stay away from the lock while one thread re-acquires uncontended at ≈ 9 ns. The `min/max` column shows only whether the threads finished together (`1.00`) or one ran through while the others waited (`0.4–0.6`); it does not show how often the lock changed hands. A build that counts owner changes inside the critical section (one extra load and compare per acquisition, 12 runs per cell on the P-cores) shows that directly. Saturated, MCS hands over on 96–100% of acquisitions, `pthread_spin_lock` on 5–21%, `ttas` on 1.5–13% and `ttas_park` on under 1%. With 150 ns of work outside the lock every lock hands over on 96–100%.
 
 ### Default run (`-t 4`: ≈ 50 ns inside the lock, ≈ 150 ns outside it)
 
@@ -261,7 +261,7 @@ With work outside the lock the lock is busy most of the time but not saturated, 
 | `pmutex` (`pthread_mutex_lock`) | 415.1 | 103.8 | 0.95 |
 | `mcs` | 402.4 | 100.6 | 1.00 |
 
-`ttas` hands the lock around (0.95) and is still 1.3x faster than `pthread_spin_lock`, whose waiters never back off and keep bouncing the lock line: that is the benefit of TTAS with backoff. `ttas_park` is 7x faster than `ttas` only because its waiters sleep ≈ 50 us while one thread runs through (0.63).
+`ttas` finishes its threads together (0.95) and 1.3x sooner than `pthread_spin_lock`, but it changes owner on only 13% of acquisitions against 19% for `pthread_spin_lock`, so part of that lead is longer runs of one thread rather than cheaper hand-offs. The like-for-like comparison is the default run above, where every lock hands over on nearly every acquisition and `ttas` is still ahead. `ttas_park` is 7x faster than `ttas` only because its waiters sleep ≈ 50 us while one thread runs through (0.63).
 
 ### Timer slack (`-S`)
 
@@ -284,7 +284,7 @@ With the 1 us backoff cap the park is the whole wait, and the slack sets its len
 | 65,536 | 40.9 / 10.2 / 0.51 | 42.7 / 0.57 | 355.1 / 0.69 |
 | 167,000 | 37.5 / 9.4 / 0.49 | 37.4 / 0.55 | 370.6 / 0.68 |
 
-Up to a microsecond `ttas` hands the lock around and beats `pthread_spin_lock`; from ≈ 8 us it becomes a serialiser, several times "faster" at min/max 0.5–0.7. The previous default, 16,000 pauses (≈ 167 us on a P-core, ≈ 351 us on an E-core), sat at that end. In the sweep below the 1 us cap is 3–6% behind `pthread_spin_lock` at 256 NOPs with 2–8 threads and ahead of it or level everywhere else.
+Up to a microsecond `ttas` finishes its threads together and beats `pthread_spin_lock`; from ≈ 8 us it becomes a serialiser, several times "faster" at min/max 0.5–0.7. The previous default, 16,000 pauses (≈ 167 us on a P-core, ≈ 351 us on an E-core), sat at that end. In the sweep below the 1 us cap is 3–6% behind `pthread_spin_lock` at 256 NOPs with 2–8 threads and ahead of it or level everywhere else.
 
 ### Oversubscription on the four P-cores (`-t 8` and `-t 16`, `-l 0 -o 0`)
 
@@ -312,7 +312,7 @@ The critical section dominates: 4 × 468 ms = 1,873 ms of serialised work is the
 
 ### Uncontended cost (`-t 1 -l 0 -o 0`, ns per lock/unlock pair)
 
-`ttas` 6.1 · `ttas_park` 6.1 · `pspin` 7.6 · `pmutex` 13.2 · `mcs` 14.5. Single-threaded, the custom TTAS lock is 1.6 ns ahead of `pthread_spin_lock`.
+`ttas` 6.1 · `ttas_park` 6.1 · `pspin` 7.6 · `pmutex` 13.2 · `mcs` 14.5. Single-threaded, the custom TTAS lock is 1.6 ns ahead of `pthread_spin_lock`. The two use the same test-and-test-and-set loop (glibc's has no backoff), but `pthread_spin_lock` and `pthread_spin_unlock` are two calls into libc through the PLT per acquisition, while the custom locks are inlined into the loop.
 
 ### Core types and contention levels
 
