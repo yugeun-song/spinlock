@@ -19,6 +19,7 @@ REPEATS_MAX: int = 14
 NOISY_CELL_CV: float = 0.05
 WARMUP_LAUNCHES: int = 3
 PLACEMENTS_PER_LAUNCH: int = 4
+FAST_CORE_CAPACITY_PERCENT: int = 80
 LAUNCH_TIMEOUT_SEC: int = 120
 # Quiescent gap between consecutive benchmark process launches, so each run
 # starts from a settled system (scheduler drained, CPU frequency relaxed,
@@ -90,25 +91,38 @@ def get_system_info() -> tuple[str, int, str]:
 
 
 def detect_perf_cores() -> list[int]:
-    """Return the CPUs in the highest-max-frequency group (the P-cores).
+    """Return the fastest core class (P-cores, big cores), first threads of each core first.
 
-    On heterogeneous machines (Intel P/E, aarch64 big.LITTLE) pinning to a single
-    homogeneous, fastest class is the largest single lever on run-to-run
-    variance: it stops the scheduler from scattering workers across fast and
-    slow cores. Returns [] when the machine is homogeneous or cpufreq is
-    unreadable (VM/container), in which case the caller leaves pinning off.
+    Same rule as the harness default: cpu_capacity, else cpuinfo_max_freq, and a CPU
+    within FAST_CORE_CAPACITY_PERCENT of the highest value is fast. Returns [] when
+    every allowed CPU is fast (homogeneous) or the values are unreadable (VM).
     """
     base = Path("/sys/devices/system/cpu")
-    groups: dict[int, list[int]] = {}
-    for d in sorted(base.glob("cpu[0-9]*")):
+    allowed = sorted(os.sched_getaffinity(0))
+    capacity: dict[int, int] = {}
+    for attribute in ("cpu_capacity", "cpufreq/cpuinfo_max_freq"):
         try:
-            khz = int((d / "cpufreq/cpuinfo_max_freq").read_text())
+            capacity = {cpu: int((base / f"cpu{cpu}" / attribute).read_text()) for cpu in allowed}
         except (OSError, ValueError):
-            return []
-        groups.setdefault(khz, []).append(int(d.name[3:]))
-    if len(groups) < 2:
+            continue
+        if max(capacity.values()) > 0:
+            break
+    else:
         return []
-    return sorted(groups[max(groups)])
+    highest = max(capacity.values())
+    fast = [cpu for cpu in allowed if capacity[cpu] * 100 >= highest * FAST_CORE_CAPACITY_PERCENT]
+    if len(fast) == len(allowed):
+        return []
+
+    def is_first_thread_of_core(cpu: int) -> bool:
+        try:
+            siblings = (base / f"cpu{cpu}" / "topology/thread_siblings_list").read_text()
+        except OSError:
+            return True
+        return int(siblings.strip().replace("-", ",").split(",")[0]) == cpu
+
+    return ([cpu for cpu in fast if is_first_thread_of_core(cpu)]
+            + [cpu for cpu in fast if not is_first_thread_of_core(cpu)])
 
 
 def pin_desc_str(pin_cores: list[int]) -> str:
@@ -143,7 +157,8 @@ def run_launch(benchmark_bin: Path, threads: int, workload: int, pin_cores: list
                lock_order: list[str]) -> dict[str, dict] | None:
     iterations = pick_iterations(workload)
     command = [str(benchmark_bin), "-F", "csv", "-t", str(threads), "-l", str(workload),
-               "-i", str(iterations), "-K", ",".join(lock_order), "-P", f"0-{PLACEMENTS_PER_LAUNCH - 1}"]
+               "-i", str(iterations), "-o", "0", "-K", ",".join(lock_order),
+               "-P", f"0-{PLACEMENTS_PER_LAUNCH - 1}"]
     if pin_cores:
         command += ["-C", ",".join(map(str, pin_cores))]
     try:
@@ -178,6 +193,8 @@ def run_launch(benchmark_bin: Path, threads: int, workload: int, pin_cores: list
             "time_ms": float(np.exp(np.mean(np.log([run["time_ms"] for run in runs])))),
             "nop_ns": float(rows[0]["nop_ns"]),
             "timer_slack_ns": int(rows[0]["timer_slack_ns"]),
+            "outside_nops": int(rows[0]["outside_nops"]),
+            "backoff_ns": [int(rows[0]["backoff_min_ns"]), int(rows[0]["backoff_max_ns"])],
             "runs": runs,
         }
     return measured
@@ -282,6 +299,11 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunn
           f"(more when robust CV > {NOISY_CELL_CV:.0%}), {WARMUP_LAUNCHES} warmup launches discarded")
     print(f"  - Placement       : each launch value is the geometric mean of {PLACEMENTS_PER_LAUNCH} runs, "
           f"one per page of lock placement (-P 0-{PLACEMENTS_PER_LAUNCH - 1})")
+    lock_settings = next((values for record in records for values in record["locks"].values()), None)
+    if lock_settings:
+        print(f"  - Lock settings   : TTAS backoff {lock_settings['backoff_ns'][0]}-"
+              f"{lock_settings['backoff_ns'][1]} ns, "
+              f"{lock_settings['outside_nops']} NOPs outside the lock (saturated)")
     print(f"  - Schedule        : shuffled launches, shuffled lock order per launch, seed {seed}")
     print(f"  - Launches        : {runner.launch_index} kept, {runner.failed_launches} rejected")
     if runnable.size and np.isfinite(runnable).any():
@@ -353,6 +375,10 @@ def write_meta(path: Path, cpu_model: str, pin_cores: list[int], threads_range: 
         "noisy_cell_cv": NOISY_CELL_CV,
         "warmup_launches": WARMUP_LAUNCHES,
         "placements_per_launch": PLACEMENTS_PER_LAUNCH,
+        "backoff_ns": next((values["backoff_ns"] for record in records for values in record["locks"].values()),
+                           None),
+        "outside_nops": next((values["outside_nops"] for record in records for values in record["locks"].values()),
+                             None),
         "launches_kept": runner.launch_index,
         "launches_rejected": runner.failed_launches,
         "runnable_tasks": {"median": float(np.nanmedian(runnable)), "max": float(np.nanmax(runnable))}
