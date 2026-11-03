@@ -19,6 +19,7 @@ This project provides custom spinlocks using architecture-specific inline assemb
     /* critical section */
     spin_unlock_mcs_node(&lock, &node);
     ```
+- **Core types**: on parts with more than one core class (Intel P/E, Arm big.LITTLE) the harness pins workers to the fastest class unless `-C` says otherwise. It reads `cpu_capacity` (else `cpufreq/cpuinfo_max_freq`) for every allowed CPU, keeps those within 80% of the highest value, and fills one hardware thread per physical core first. Homogeneous parts are not pinned.
 - **OS**: Linux
 - **Compilers**: GCC or Clang (Standard: `gnu99`)
 - **Build Systems**: GNU Make (≥ 4.3) and CMake (≥ 3.16)
@@ -144,30 +145,31 @@ Run the binary directly from the command line. If no arguments are provided, def
 | :--- | :--- | :--- | :--- |
 | `-t` | `<threads>` | **Thread Count**: Number of concurrent worker threads to spawn. | `4` |
 | `-i` | `<iters>` | **Iterations**: Number of critical section entries per thread. | `1,000,000` |
-| `-l` | `<loops>` | **Workload**: Number of `nop` instructions to execute inside the critical section (simulates load). | `500` |
+| `-l` | `<loops>` | **Workload**: Number of `nop` loop iterations inside the critical section (simulates load). | ≈ 50 ns |
+| `-o` | `<loops>` | **Outside work**: Number of `nop` loop iterations each thread runs after releasing the lock and before asking again, so the lock is contended as in real code rather than saturated. `0` is the saturated stress test that `test_bench.py` runs. | ≈ 150 ns |
 | `-m` | `<ns>` | **Min Backoff**: First backoff window after a failed CAS, in nanoseconds. | `32` |
 | `-M` | `<ns>` | **Max Backoff**: Cap of the doubling backoff window, in nanoseconds. `ttas_park` sleeps 1 us per failed CAS once the cap is reached. | `1,024` |
-| `-C` | `<cpulist>` | **Pin**: Bind workers round-robin to these cores (e.g. `0-3` or `0,2,4`) for deterministic one-thread-per-core placement. Pass at least as many cores as threads from one homogeneous class (all P or all E) to control P/E-core variance. | none |
+| `-C` | `<cpulist>` | **Pin**: Bind workers round-robin to these cores (e.g. `0-3` or `0,2,4`), or `none`. Without `-C`, P/E and big.LITTLE parts pin to the fastest core class (see [Supported Platforms](#supported-platforms)) and homogeneous parts run unpinned. | fastest core class |
 | `-K` | `<locks>` | **Contenders**: Comma-separated subset of `ttas,ttas_park,pspin,pmutex,mcs`, run in the given order. Drop `mcs` at thread counts that oversubscribe the cores, where the queue lock convoys. | all five |
 | `-S` | `<ns>` | **Timer slack**: `prctl(PR_SET_TIMERSLACK)` for the process before the workers start; it stretches every `nanosleep` of `ttas_park`. `0` restores the kernel default, the smallest value is `1`. The effective value is printed in the header. | inherited (50,000 ns) |
 | `-F` | `<format>` | **Output**: `text`, or `csv` with one row per contender and page (what `test_bench.py` reads). | `text` |
 | `-P` | `<pages>` | **Placement**: Run every contender once per listed page of a private pool (e.g. `0-3` or `2,0,2`, pages `0`–`63`). Each page holds the four locks and the shared counter at the same offsets, so the list sets their physical placement. | `0` |
 | `-h` | N/A | **Help**: Display usage information and exit. | N/A |
 
-The header also prints the measured cost of one workload loop iteration (`NOP Cost`, taken once at startup on the first pinned core) so critical-section sizes can be read in nanoseconds. Each contender prints a **`Fairness`** line: the earliest and latest per-thread completion time measured from the start barrier, and their ratio (`min/max`; `1.00` means every thread finished together, a small value means one thread ran through while the others waited). A **`Switches`** line counts the workers' involuntary (preemption) and voluntary context switches, and a **`Placement`** line names the page. The process exits with status 1 if any contender's atomic count is wrong.
+The header prints the measured cost of one workload loop iteration (`NOP Cost`, taken at startup on the first pinned core after a 50 ms warm-up) and shows `-l` and `-o` in NOPs and nanoseconds. Both defaults are sized from that cost, so they mean the same time on any core. Each contender prints a **`Fairness`** line: the earliest and latest per-thread completion time measured from the start barrier, and their ratio (`min/max`; `1.00` means every thread finished together, a small value means one thread ran through while the others waited). A **`Switches`** line counts the workers' involuntary (preemption) and voluntary context switches, and a **`Placement`** line names the page. The process exits with status 1 if any contender's atomic count is wrong.
 
 ### Execution Examples
 
 #### 1. Default Run
-Use standard settings (optimized for general testing).
+4 threads, 50 ns inside the lock and 150 ns outside it: heavy but not saturated contention. On P/E or big.LITTLE parts the workers run on the fastest core class.
 ```bash
 ./bin/x86_64-linux-gcc/release/spinlock_test
 ```
 
 #### 2. High Contention Test
-Simulate heavy contention with 8 threads and a very short critical section.
+Saturate the lock: 8 threads, an empty critical section and no work outside the lock.
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test -t 8 -l 0
+./bin/x86_64-linux-gcc/release/spinlock_test -t 8 -l 0 -o 0
 ```
 
 #### 3. Long Critical Section Test
@@ -183,7 +185,7 @@ Set the backoff window in nanoseconds, here 64 ns doubling up to 4 us. The windo
 ```
 
 #### 5. Controlled Run (pinning + contender selection)
-Pin all workers to the four P-cores for low-variance, deterministic placement, and compare only the TTAS lock against POSIX (dropping the MCS queue lock):
+Pin explicitly (here the four P-cores, which is also the default on this host) and compare only the TTAS lock against POSIX (dropping the MCS queue lock):
 ```bash
 ./bin/x86_64-linux-gcc/release/spinlock_test -t 4 -C 0-3 -K ttas,pspin
 ```
@@ -191,7 +193,7 @@ Pin all workers to the four P-cores for low-variance, deterministic placement, a
 #### 6. Timer Slack
 Run the parking TTAS and the POSIX mutex with a 1 ns timer slack, so `nanosleep(1 us)` returns after ~2 us instead of ~50 us:
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test -t 4 -C 0-3 -l 0 -S 1 -K ttas_park,pmutex
+./bin/x86_64-linux-gcc/release/spinlock_test -t 4 -C 0-3 -l 0 -o 0 -S 1 -K ttas_park,pmutex
 ```
 
 ## Profiling & Tracing the Debug Build

@@ -26,8 +26,9 @@
 #define MEASUREMENT_CSV_HEADER                                                                     \
     "lock,run_position,threads,iterations,workload_nops,nop_ns,timer_slack_ns,elapsed_ms,"         \
     "shared_count,expected_count,count_ok,earliest_done_ms,voluntary_switches,"                    \
-    "involuntary_switches,placement_page"
+    "involuntary_switches,placement_page,outside_nops,backoff_min_ns,backoff_max_ns"
 #define CACHE_LINE_PAIR_SIZE (2 * CACHE_LINE_SIZE)
+#define NOP_LOOPS_UNSET (-1)
 
 /*
  * Cache-line-isolated wrapper for the POSIX spinlock. pthread_spinlock_t is a
@@ -103,7 +104,8 @@ enum output_format {
 };
 
 static int g_conf_iterations = DEFAULT_ITERATIONS;
-static int g_conf_workload_nop_loops = DEFAULT_WORKLOAD_NOP_LOOPS;
+static int g_conf_workload_nop_loops = NOP_LOOPS_UNSET;
+static int g_conf_outside_nop_loops = NOP_LOOPS_UNSET;
 static int g_conf_thread_count = DEFAULT_THREAD_COUNT;
 static int g_conf_timerslack_ns = -1;
 
@@ -128,6 +130,8 @@ static int g_contender_run_count = BENCH_LOCK_COUNT;
  */
 static int *g_conf_pinned_cpu_ids = NULL;
 static int g_conf_pinned_cpu_count = 0;
+static int g_conf_pinning_requested = 0;
+static const char *g_pinning_note = "";
 
 static int *g_conf_placement_pages = NULL;
 static int g_conf_placement_run_count = 0;
@@ -176,17 +180,28 @@ static void *worker_routine_ttas(void *raw_context)
 
     const int iterations = g_conf_iterations;
     const int nop_loops = g_conf_workload_nop_loops;
+    const int outside_loops = g_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     spinlock_ttas_t *const lock = context->ttas_lock;
 
     pthread_barrier_wait(context->start_barrier);
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
-    for (int iteration = 0; iteration < iterations; ++iteration) {
-        spin_lock_ttas(lock);
-        *shared_counter += 1;
-        run_dummy_workload(nop_loops);
-        spin_unlock_ttas(lock);
+    if (outside_loops > 0) {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            spin_lock_ttas(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            spin_unlock_ttas(lock);
+            run_dummy_workload(outside_loops);
+        }
+    } else {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            spin_lock_ttas(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            spin_unlock_ttas(lock);
+        }
     }
 
     record_loop_end(context);
@@ -203,17 +218,28 @@ static void *worker_routine_ttas_park(void *raw_context)
 
     const int iterations = g_conf_iterations;
     const int nop_loops = g_conf_workload_nop_loops;
+    const int outside_loops = g_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     spinlock_ttas_t *const lock = context->ttas_lock;
 
     pthread_barrier_wait(context->start_barrier);
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
-    for (int iteration = 0; iteration < iterations; ++iteration) {
-        spin_lock_ttas_park(lock);
-        *shared_counter += 1;
-        run_dummy_workload(nop_loops);
-        spin_unlock_ttas(lock);
+    if (outside_loops > 0) {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            spin_lock_ttas_park(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            spin_unlock_ttas(lock);
+            run_dummy_workload(outside_loops);
+        }
+    } else {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            spin_lock_ttas_park(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            spin_unlock_ttas(lock);
+        }
     }
 
     record_loop_end(context);
@@ -230,17 +256,28 @@ static void *worker_routine_mcs(void *raw_context)
 
     const int iterations = g_conf_iterations;
     const int nop_loops = g_conf_workload_nop_loops;
+    const int outside_loops = g_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     spinlock_mcs_t *const lock = context->mcs_lock;
 
     pthread_barrier_wait(context->start_barrier);
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
-    for (int iteration = 0; iteration < iterations; ++iteration) {
-        spin_lock_mcs(lock);
-        *shared_counter += 1;
-        run_dummy_workload(nop_loops);
-        spin_unlock_mcs(lock);
+    if (outside_loops > 0) {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            spin_lock_mcs(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            spin_unlock_mcs(lock);
+            run_dummy_workload(outside_loops);
+        }
+    } else {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            spin_lock_mcs(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            spin_unlock_mcs(lock);
+        }
     }
 
     record_loop_end(context);
@@ -257,17 +294,28 @@ static void *worker_routine_posix_spinlock(void *raw_context)
 
     const int iterations = g_conf_iterations;
     const int nop_loops = g_conf_workload_nop_loops;
+    const int outside_loops = g_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     pthread_spinlock_t *const lock = context->posix_spinlock;
 
     pthread_barrier_wait(context->start_barrier);
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
-    for (int iteration = 0; iteration < iterations; ++iteration) {
-        pthread_spin_lock(lock);
-        *shared_counter += 1;
-        run_dummy_workload(nop_loops);
-        pthread_spin_unlock(lock);
+    if (outside_loops > 0) {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            pthread_spin_lock(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            pthread_spin_unlock(lock);
+            run_dummy_workload(outside_loops);
+        }
+    } else {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            pthread_spin_lock(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            pthread_spin_unlock(lock);
+        }
     }
 
     record_loop_end(context);
@@ -284,17 +332,28 @@ static void *worker_routine_posix_mutex(void *raw_context)
 
     const int iterations = g_conf_iterations;
     const int nop_loops = g_conf_workload_nop_loops;
+    const int outside_loops = g_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     pthread_mutex_t *const lock = context->posix_mutex;
 
     pthread_barrier_wait(context->start_barrier);
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
-    for (int iteration = 0; iteration < iterations; ++iteration) {
-        pthread_mutex_lock(lock);
-        *shared_counter += 1;
-        run_dummy_workload(nop_loops);
-        pthread_mutex_unlock(lock);
+    if (outside_loops > 0) {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            pthread_mutex_lock(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            pthread_mutex_unlock(lock);
+            run_dummy_workload(outside_loops);
+        }
+    } else {
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            pthread_mutex_lock(lock);
+            *shared_counter += 1;
+            run_dummy_workload(nop_loops);
+            pthread_mutex_unlock(lock);
+        }
     }
 
     record_loop_end(context);
@@ -304,9 +363,16 @@ static void *worker_routine_posix_mutex(void *raw_context)
 static void *calibration_routine_nop(void *raw_calibration)
 {
     struct nop_calibration *calibration = (struct nop_calibration *)raw_calibration;
+    struct timespec warmup_begin_time;
     struct timespec pass_begin_time;
     struct timespec pass_end_time;
     double best_pass_ms = 1e300;
+
+    clock_gettime(CLOCK_MONOTONIC, &warmup_begin_time);
+    do {
+        run_dummy_workload(calibration->loop_count);
+        clock_gettime(CLOCK_MONOTONIC, &pass_end_time);
+    } while (elapsed_milliseconds_between(&warmup_begin_time, &pass_end_time) < NOP_CALIBRATION_WARMUP_MS);
 
     for (int pass_index = 0; pass_index < NOP_CALIBRATION_PASSES; ++pass_index) {
         clock_gettime(CLOCK_MONOTONIC, &pass_begin_time);
@@ -460,6 +526,100 @@ static int parse_index_list(const char *argument_text, long index_limit, const c
     return index_count;
 }
 
+static int read_cpu_attribute(size_t cpu_index, const char *attribute_name, long *attribute_value)
+{
+    char attribute_path[128];
+    FILE *attribute_file;
+    int parsed_count;
+
+    snprintf(attribute_path, sizeof(attribute_path), "/sys/devices/system/cpu/cpu%zu/%s", cpu_index, attribute_name);
+    attribute_file = fopen(attribute_path, "r");
+    if (!attribute_file) {
+        return 0;
+    }
+    parsed_count = fscanf(attribute_file, "%ld", attribute_value);
+    fclose(attribute_file);
+    return parsed_count == 1;
+}
+
+static int is_first_thread_of_core(size_t cpu_index)
+{
+    long first_sibling;
+
+    if (!read_cpu_attribute(cpu_index, "topology/thread_siblings_list", &first_sibling)) {
+        return 1;
+    }
+    return first_sibling == (long)cpu_index;
+}
+
+static void select_fastest_core_class(void)
+{
+    static const char *const capacity_attributes[] = {"cpu_capacity", "cpufreq/cpuinfo_max_freq"};
+    const size_t attribute_count = sizeof(capacity_attributes) / sizeof(capacity_attributes[0]);
+    long cpu_capacities[CPU_SETSIZE];
+    cpu_set_t allowed_cpus;
+    long highest_capacity = 0;
+    size_t attribute_index;
+    int allowed_count = 0;
+    int fast_count = 0;
+
+    if (sched_getaffinity(0, sizeof(allowed_cpus), &allowed_cpus) != 0) {
+        g_pinning_note = "none (CPU affinity unreadable)";
+        return;
+    }
+    for (attribute_index = 0; attribute_index < attribute_count; ++attribute_index) {
+        int all_readable = 1;
+        highest_capacity = 0;
+        allowed_count = 0;
+        for (size_t cpu_index = 0; cpu_index < CPU_SETSIZE && all_readable; ++cpu_index) {
+            if (!CPU_ISSET(cpu_index, &allowed_cpus)) {
+                continue;
+            }
+            ++allowed_count;
+            all_readable = read_cpu_attribute(cpu_index, capacity_attributes[attribute_index],
+                                              &cpu_capacities[cpu_index]);
+            if (all_readable && cpu_capacities[cpu_index] > highest_capacity) {
+                highest_capacity = cpu_capacities[cpu_index];
+            }
+        }
+        if (all_readable && highest_capacity > 0) {
+            break;
+        }
+    }
+    if (attribute_index == attribute_count) {
+        g_pinning_note = "none (core classes unreadable)";
+        return;
+    }
+
+    for (size_t cpu_index = 0; cpu_index < CPU_SETSIZE; ++cpu_index) {
+        if (CPU_ISSET(cpu_index, &allowed_cpus) &&
+            cpu_capacities[cpu_index] * 100 >= highest_capacity * FAST_CORE_CAPACITY_PERCENT) {
+            ++fast_count;
+        }
+    }
+    if (fast_count == allowed_count) {
+        g_pinning_note = "none (one core class)";
+        return;
+    }
+
+    g_conf_pinned_cpu_ids = malloc((size_t)fast_count * sizeof(*g_conf_pinned_cpu_ids));
+    if (!g_conf_pinned_cpu_ids) {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+    for (int sibling_pass = 0; sibling_pass < 2; ++sibling_pass) {
+        for (size_t cpu_index = 0; cpu_index < CPU_SETSIZE; ++cpu_index) {
+            if (CPU_ISSET(cpu_index, &allowed_cpus) &&
+                cpu_capacities[cpu_index] * 100 >= highest_capacity * FAST_CORE_CAPACITY_PERCENT &&
+                is_first_thread_of_core(cpu_index) == (sibling_pass == 0)) {
+                g_conf_pinned_cpu_ids[g_conf_pinned_cpu_count] = (int)cpu_index;
+                ++g_conf_pinned_cpu_count;
+            }
+        }
+    }
+    g_pinning_note = " (fastest core class, auto)";
+}
+
 static void map_placement_pool(void)
 {
     const long page_size = sysconf(_SC_PAGESIZE);
@@ -528,12 +688,13 @@ static inline void print_usage(const char *program_name)
             "Options:\n"
             "  -t <threads>    Number of threads (Range: %d-%d, default: %d)\n"
             "  -i <iters>      Iterations per thread (Range: %d-%d, default: %d)\n"
-            "  -l <loops>      Dummy Task Count (Mock NOP) (Range: %d-%d, default: %d)\n"
+            "  -l <loops>      NOP loops inside the lock (Range: %d-%d, default: %d ns worth)\n"
+            "  -o <loops>      NOP loops outside the lock (Range: %d-%d, default: %d ns worth)\n"
             "  -m <ns>         Min TTAS backoff in ns (Range: %d-%d, default: %d)\n"
             "  -M <ns>         Max TTAS backoff in ns (Range: %d-%d, default: %d)\n"
-            "  -C <cpulist>    Pin workers to these cores round-robin, e.g. 0-3 or 0,2,4\n"
-            "                  (deterministic placement; pass >= as many cores as threads\n"
-            "                  from one homogeneous class to control P/E-core variance)\n"
+            "  -C <cpulist>    Pin workers to these cores round-robin, e.g. 0-3 or 0,2,4, or none\n"
+            "                  (default: the fastest core class when the cores differ, as on\n"
+            "                  P/E or big.LITTLE parts; no pinning when they are all alike)\n"
             "  -K <locks>      Contenders to run, in this order, comma-separated subset of\n"
             "                  " CONTENDER_KEY_LIST " (default: all five)\n"
             "  -S <ns>         Timer slack via prctl(PR_SET_TIMERSLACK); it stretches every\n"
@@ -545,7 +706,8 @@ static inline void print_usage(const char *program_name)
             "  -h              Show this help and exit\n",
             program_name, MIN_THREAD_COUNT, MAX_THREAD_COUNT, DEFAULT_THREAD_COUNT, MIN_ITERATIONS,
             MAX_ITERATIONS, DEFAULT_ITERATIONS, MIN_WORKLOAD_NOP_LOOPS, MAX_WORKLOAD_NOP_LOOPS,
-            DEFAULT_WORKLOAD_NOP_LOOPS, MIN_BACKOFF_NS, MAX_BACKOFF_NS, DEFAULT_BACKOFF_MIN_NS,
+            DEFAULT_CRITICAL_SECTION_NS, MIN_WORKLOAD_NOP_LOOPS, MAX_WORKLOAD_NOP_LOOPS,
+            DEFAULT_OUTSIDE_WORK_NS, MIN_BACKOFF_NS, MAX_BACKOFF_NS, DEFAULT_BACKOFF_MIN_NS,
             MIN_BACKOFF_NS, MAX_BACKOFF_NS, DEFAULT_BACKOFF_MAX_NS, MAX_PLACEMENT_PAGES - 1);
 }
 
@@ -714,12 +876,13 @@ static void print_contender_measurement(enum bench_lock lock_id, int run_positio
     const int count_matched = measurement->shared_count == measurement->expected_count;
 
     if (g_conf_output_format == OUTPUT_FORMAT_CSV) {
-        printf("%s,%d,%d,%d,%d,%.4f,%d,%.6f,%lld,%lld,%d,%.6f,%ld,%ld,%d\n",
+        printf("%s,%d,%d,%d,%d,%.4f,%d,%.6f,%lld,%lld,%d,%.6f,%ld,%ld,%d,%d,%d,%d\n",
                g_contenders[lock_id].cli_key, run_position, g_conf_thread_count, g_conf_iterations,
                g_conf_workload_nop_loops, g_measured_nop_ns, prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0),
                measurement->elapsed_ms, measurement->shared_count, measurement->expected_count,
                count_matched, measurement->earliest_done_ms, measurement->voluntary_switches,
-               measurement->involuntary_switches, placement_page);
+               measurement->involuntary_switches, placement_page, g_conf_outside_nop_loops,
+               g_conf_backoff_min_ns, g_conf_backoff_max_ns);
         return;
     }
     printf("[ %-22s ]\n"
@@ -785,14 +948,23 @@ void bench_parse_args(int argc, char *argv[])
     }
 
     int option_char;
-    while ((option_char = getopt(argc, argv, "+t:i:l:m:M:C:K:S:F:P:")) != -1) {
+    while ((option_char = getopt(argc, argv, "+t:i:l:o:m:M:C:K:S:F:P:")) != -1) {
         switch (option_char) {
         case 't':
             g_conf_thread_count = parse_bounded_int(optarg, MIN_THREAD_COUNT, MAX_THREAD_COUNT, "threads");
             break;
         case 'C':
-            g_conf_pinned_cpu_count =
-                parse_index_list(optarg, configured_cpu_id_limit(), "CPU", &g_conf_pinned_cpu_ids);
+            g_conf_pinning_requested = 1;
+            if (strcmp(optarg, "none") == 0) {
+                free(g_conf_pinned_cpu_ids);
+                g_conf_pinned_cpu_ids = NULL;
+                g_conf_pinned_cpu_count = 0;
+                g_pinning_note = "none (-C none)";
+            } else {
+                g_conf_pinned_cpu_count =
+                    parse_index_list(optarg, configured_cpu_id_limit(), "CPU", &g_conf_pinned_cpu_ids);
+                g_pinning_note = "";
+            }
             break;
         case 'P':
             g_conf_placement_run_count =
@@ -808,6 +980,10 @@ void bench_parse_args(int argc, char *argv[])
             g_conf_workload_nop_loops =
                 parse_bounded_int(optarg, MIN_WORKLOAD_NOP_LOOPS, MAX_WORKLOAD_NOP_LOOPS, "load_loops");
             break;
+        case 'o':
+            g_conf_outside_nop_loops =
+                parse_bounded_int(optarg, MIN_WORKLOAD_NOP_LOOPS, MAX_WORKLOAD_NOP_LOOPS, "outside_loops");
+            break;
         case 'm':
             g_conf_backoff_min_ns = parse_bounded_int(optarg, MIN_BACKOFF_NS, MAX_BACKOFF_NS, "backoff_min_ns");
             break;
@@ -821,8 +997,9 @@ void bench_parse_args(int argc, char *argv[])
             g_conf_output_format = parse_output_format(optarg);
             break;
         case '?':
-            if (optopt == 't' || optopt == 'i' || optopt == 'l' || optopt == 'm' || optopt == 'M' ||
-                optopt == 'C' || optopt == 'K' || optopt == 'S' || optopt == 'F' || optopt == 'P') {
+            if (optopt == 't' || optopt == 'i' || optopt == 'l' || optopt == 'o' || optopt == 'm' ||
+                optopt == 'M' || optopt == 'C' || optopt == 'K' || optopt == 'S' || optopt == 'F' ||
+                optopt == 'P') {
                 fprintf(stderr, "Error: Option '-%c' requires an argument.\n", optopt);
             } else {
                 fprintf(stderr, "Error: Unknown option '-%c'.\n", optopt);
@@ -852,6 +1029,9 @@ void bench_parse_args(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    if (!g_conf_pinning_requested) {
+        select_fastest_core_class();
+    }
     map_placement_pool();
 }
 
@@ -874,6 +1054,13 @@ void bench_lock_memory(void)
     }
 }
 
+static int nop_loops_for_nanoseconds(int target_ns)
+{
+    const double loop_count = (g_measured_nop_ns > 0.0) ? target_ns / g_measured_nop_ns : 0.0;
+
+    return (loop_count < (double)INT_MAX) ? (int)(loop_count + 0.5) : INT_MAX;
+}
+
 void bench_calibrate(void)
 {
     struct nop_calibration nop_calibration = {.loop_count = NOP_CALIBRATION_LOOPS, .nanoseconds_per_loop = 0.0};
@@ -891,6 +1078,12 @@ void bench_calibrate(void)
     }
     pthread_join(calibration_thread, NULL);
     g_measured_nop_ns = nop_calibration.nanoseconds_per_loop;
+    if (g_conf_workload_nop_loops == NOP_LOOPS_UNSET) {
+        g_conf_workload_nop_loops = nop_loops_for_nanoseconds(DEFAULT_CRITICAL_SECTION_NS);
+    }
+    if (g_conf_outside_nop_loops == NOP_LOOPS_UNSET) {
+        g_conf_outside_nop_loops = nop_loops_for_nanoseconds(DEFAULT_OUTSIDE_WORK_NS);
+    }
     spin_calibrate_backoff_clock();
 }
 
@@ -904,15 +1097,16 @@ void bench_print_config(void)
     if (g_conf_pinned_cpu_count > 0) {
         int written_length = snprintf(pinning_description, sizeof(pinning_description), "cpus");
         for (int cpu_index = 0;
-             cpu_index < g_conf_pinned_cpu_count && written_length < (int)sizeof(pinning_description) - 8;
+             cpu_index < g_conf_pinned_cpu_count && written_length < (int)sizeof(pinning_description) - 40;
              ++cpu_index) {
             written_length += snprintf(pinning_description + written_length,
                                        sizeof(pinning_description) - (size_t)written_length, " %d",
                                        g_conf_pinned_cpu_ids[cpu_index]);
         }
+        snprintf(pinning_description + written_length,
+                 sizeof(pinning_description) - (size_t)written_length, "%s", g_pinning_note);
     } else {
-        snprintf(pinning_description, sizeof(pinning_description),
-                 "none (WARNING: P/E-core scheduling variance uncontrolled)");
+        snprintf(pinning_description, sizeof(pinning_description), "%s", g_pinning_note);
     }
 
     printf("\n--- SPINLOCK BENCHMARK SUITE START ---\n"
@@ -923,14 +1117,17 @@ void bench_print_config(void)
            "Configuration:\n"
            "  Threads        : %d\n"
            "  Iterations     : %d\n"
-           "  Dummy Tasks    : %d\n"
+           "  Inside Lock    : %d NOPs (%.1f ns)\n"
+           "  Outside Lock   : %d NOPs (%.1f ns)\n"
            "  Backoff Range  : %d ~ %d ns\n"
            "  Settle Delay   : %d ms (between tests)\n"
            "  Memory Lock    : %s\n"
            "  Pinning        : %s\n"
            "--------------------------------------\n\n",
            g_detected_cache_line_size, prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), g_measured_nop_ns,
-           g_conf_thread_count, g_conf_iterations, g_conf_workload_nop_loops, g_conf_backoff_min_ns,
+           g_conf_thread_count, g_conf_iterations, g_conf_workload_nop_loops,
+           g_conf_workload_nop_loops * g_measured_nop_ns, g_conf_outside_nop_loops,
+           g_conf_outside_nop_loops * g_measured_nop_ns, g_conf_backoff_min_ns,
            g_conf_backoff_max_ns, SETTLE_DELAY_MS, g_memory_lock_status, pinning_description);
 }
 
