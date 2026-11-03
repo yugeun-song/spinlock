@@ -46,11 +46,14 @@
 #endif
 
 /*
- * Backoff window of the TTAS disciplines in pause iterations, defined in
+ * Backoff window of the TTAS disciplines in nanoseconds, defined in
  * spinlock.c with these defaults and re-tuned by the benchmark's -m / -M.
+ * The wait is timed with the CPU tick counter, so the window is the same
+ * wall time on every core type, whatever a pause or yield costs there.
  */
-#define SPINLOCK_DEFAULT_SPIN_MIN 4
-#define SPINLOCK_DEFAULT_SPIN_MAX 16000
+#define SPINLOCK_DEFAULT_BACKOFF_MIN_NS 32
+#define SPINLOCK_DEFAULT_BACKOFF_MAX_NS 1024
+#define SPINLOCK_TICK_CALIBRATION_NS 200000
 
 typedef int spinlock_word_t;
 
@@ -59,7 +62,9 @@ typedef int spinlock_word_t;
  * running on x86-64 and aarch64:
  *
  *   - spin_lock_ttas      : test-and-test-and-set with exponential backoff
- *     capped at g_conf_spin_max pause iterations. Pure spin, never sleeps.
+ *     capped at g_conf_backoff_max_ns; each wait is drawn from the upper half
+ *     of the current window so waiters do not retry in lockstep. Pure spin,
+ *     never sleeps.
  *   - spin_lock_ttas_park : the same loop, but once the cap is reached every
  *     further failed CAS calls nanosleep(1 us). The real sleep is 1 us plus
  *     the thread's timer slack (50 us by default on Linux), so waiters park
@@ -99,8 +104,10 @@ typedef struct {
     char cache_line_padding[CACHE_LINE_SIZE - sizeof(mcs_node_t *)];
 } __attribute__((aligned(CACHE_LINE_SIZE))) spinlock_mcs_t;
 
-extern int g_conf_spin_min;
-extern int g_conf_spin_max;
+extern int g_conf_backoff_min_ns;
+extern int g_conf_backoff_max_ns;
+extern unsigned long long g_spin_ticks_per_ns_q16;
+extern __thread unsigned int spin_backoff_jitter_state;
 
 /*
  * Per-thread node behind the single-argument spin_lock_mcs / spin_unlock_mcs
@@ -127,6 +134,95 @@ static inline void cpu_relax(void)
 #elif defined(__aarch64__)
     asm volatile("yield" ::: "memory");
 #endif
+}
+
+static inline unsigned long long spin_read_ticks(void)
+{
+#if defined(__x86_64__)
+    unsigned int low_word;
+    unsigned int high_word;
+
+    asm volatile("rdtsc" : "=a"(low_word), "=d"(high_word));
+    return ((unsigned long long)high_word << 32) | low_word;
+#elif defined(__aarch64__)
+    unsigned long long virtual_count;
+
+    asm volatile("mrs %0, cntvct_el0" : "=r"(virtual_count));
+    return virtual_count;
+#endif
+}
+
+static inline unsigned long long spin_measure_ticks_per_ns_q16(void)
+{
+    unsigned long long ticks_per_ns_q16;
+#if defined(__x86_64__)
+    struct timespec begin_time;
+    struct timespec now_time;
+    unsigned long long begin_ticks;
+    unsigned long long elapsed_ns;
+
+    clock_gettime(CLOCK_MONOTONIC, &begin_time);
+    begin_ticks = spin_read_ticks();
+    do {
+        clock_gettime(CLOCK_MONOTONIC, &now_time);
+        elapsed_ns = (unsigned long long)(now_time.tv_sec - begin_time.tv_sec) * 1000000000ULL +
+                     (unsigned long long)now_time.tv_nsec - (unsigned long long)begin_time.tv_nsec;
+    } while (elapsed_ns < SPINLOCK_TICK_CALIBRATION_NS);
+    ticks_per_ns_q16 = ((spin_read_ticks() - begin_ticks) << 16) / elapsed_ns;
+#elif defined(__aarch64__)
+    unsigned long long counter_frequency_hz;
+
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(counter_frequency_hz));
+    ticks_per_ns_q16 = (counter_frequency_hz << 16) / 1000000000ULL;
+#endif
+    return (ticks_per_ns_q16 > 0) ? ticks_per_ns_q16 : 1;
+}
+
+static inline void spin_calibrate_backoff_clock(void)
+{
+    __atomic_store_n(&g_spin_ticks_per_ns_q16, spin_measure_ticks_per_ns_q16(), __ATOMIC_RELAXED);
+}
+
+static inline unsigned long long spin_ticks_per_ns_q16(void)
+{
+    unsigned long long ticks_per_ns_q16 = __atomic_load_n(&g_spin_ticks_per_ns_q16, __ATOMIC_RELAXED);
+
+    if (__builtin_expect(ticks_per_ns_q16 == 0, 0)) {
+        ticks_per_ns_q16 = spin_measure_ticks_per_ns_q16();
+        __atomic_store_n(&g_spin_ticks_per_ns_q16, ticks_per_ns_q16, __ATOMIC_RELAXED);
+    }
+    return ticks_per_ns_q16;
+}
+
+static inline unsigned int spin_next_backoff_jitter(void)
+{
+    unsigned int jitter_state = spin_backoff_jitter_state;
+
+    if (jitter_state == 0) {
+        jitter_state = (unsigned int)spin_read_ticks() ^
+                       (unsigned int)(unsigned long)&spin_backoff_jitter_state ^ 0x9e3779b9u;
+        if (jitter_state == 0) {
+            jitter_state = 0x9e3779b9u;
+        }
+    }
+    jitter_state ^= jitter_state << 13;
+    jitter_state ^= jitter_state >> 17;
+    jitter_state ^= jitter_state << 5;
+    spin_backoff_jitter_state = jitter_state;
+    return jitter_state;
+}
+
+static inline void spin_backoff_wait(int backoff_ns)
+{
+    const unsigned long long window_ticks = ((unsigned long long)backoff_ns * spin_ticks_per_ns_q16()) >> 16;
+    const unsigned long long jitter_ticks =
+        ((window_ticks / 2) * (spin_next_backoff_jitter() & 0xffffu)) >> 16;
+    const unsigned long long wait_ticks = window_ticks - window_ticks / 2 + jitter_ticks;
+    const unsigned long long begin_ticks = spin_read_ticks();
+
+    while (spin_read_ticks() - begin_ticks < wait_ticks) {
+        cpu_relax();
+    }
 }
 
 static inline void spin_init_ttas(spinlock_ttas_t *lock)
@@ -214,10 +310,9 @@ static inline int ttas_cas_acquire(spinlock_ttas_t *lock)
 
 static inline void ttas_acquire(spinlock_ttas_t *lock, int park_when_capped)
 {
-    const struct timespec park_duration = {.tv_sec = 0, .tv_nsec = 1000};
-    const int spin_max_pause_count = g_conf_spin_max;
-    int backoff_pause_count = g_conf_spin_min;
-    int pause_index;
+    static const struct timespec park_duration = {.tv_sec = 0, .tv_nsec = 1000};
+    const int backoff_max_ns = g_conf_backoff_max_ns;
+    int backoff_ns = g_conf_backoff_min_ns;
 
     while (1) {
         /*
@@ -230,23 +325,21 @@ static inline void ttas_acquire(spinlock_ttas_t *lock, int park_when_capped)
             cpu_relax();
         }
 
-        if (ttas_cas_acquire(lock)) {
+        if (__builtin_expect(ttas_cas_acquire(lock), 1)) {
             return;
         }
 
-        for (pause_index = 0; pause_index < backoff_pause_count; ++pause_index) {
-            cpu_relax();
-        }
+        spin_backoff_wait(backoff_ns);
 
         /*
          * Double the backoff until it would pass the cap, then hold it at the
          * cap. Comparing against half the cap instead of doubling first keeps
          * the arithmetic inside int for every cap value a caller can set.
          */
-        if (backoff_pause_count <= spin_max_pause_count / 2) {
-            backoff_pause_count *= 2;
+        if (backoff_ns <= backoff_max_ns / 2) {
+            backoff_ns *= 2;
         } else {
-            backoff_pause_count = spin_max_pause_count;
+            backoff_ns = backoff_max_ns;
             if (park_when_capped) {
                 nanosleep(&park_duration, NULL);
             }

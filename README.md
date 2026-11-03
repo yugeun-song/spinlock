@@ -4,12 +4,12 @@ This project provides custom spinlocks using architecture-specific inline assemb
 
 ## Supported Platforms
 - **Architecture**: x86-64 and aarch64. Each acquire/release primitive is emitted as architecture-specific inline assembly selected at compile time (`#if defined(__x86_64__)` / `__aarch64__`); any other target stops with a `#error`.
-  - **x86-64**: `pause` spin hint, `lock cmpxchgl` acquire, and a plain store release — sufficient under the strong x86-TSO memory model.
-  - **aarch64**: `yield` spin hint and an `stlr` store-release (a plain store is *not* a release on the weakly-ordered aarch64 memory model). The acquire is chosen at compile time:
+  - **x86-64**: `pause` spin hint, `lock cmpxchgl` acquire, and a plain store release — sufficient under the strong x86-TSO memory model. The TTAS backoff is timed with `rdtsc`, calibrated once against `CLOCK_MONOTONIC`.
+  - **aarch64**: `yield` spin hint and an `stlr` store-release (a plain store is *not* a release on the weakly-ordered aarch64 memory model). The TTAS backoff is timed with the generic timer (`cntvct_el0`, frequency from `cntfrq_el0`). The acquire is chosen at compile time:
     - **v8.1 LSE** (`__ARM_FEATURE_ATOMICS` defined): a single-instruction `casa` (load-acquire compare-and-swap). With no exclusive monitor to lose, it has no retry loop and scales far better under heavy contention. Enabled when the toolchain targets an LSE-capable CPU (e.g. `-march=armv8.1-a` or `-march=armv8-a+lse`).
     - **Baseline v8.0** (`-march=armv8-a`, no LSE): an `ldaxr`/`stlxr` load-acquire exclusive CAS retry loop with `clrex` on mismatch — the portable fallback used when LSE is unavailable.
 - **Lock disciplines** (all on x86-64 and aarch64; a NULL lock pointer faults, it is not silently ignored):
-  - **`spin_lock_ttas`** / **`spin_unlock_ttas`** — test-and-test-and-set with exponential backoff between failed CAS attempts (`-m`..`-M` pause iterations, default 4..16,000). Pure spin: a waiter never leaves the CPU. An uncontended acquire is a single CAS.
+  - **`spin_lock_ttas`** / **`spin_unlock_ttas`** — test-and-test-and-set with exponential backoff between failed CAS attempts, timed in nanoseconds (`-m`..`-M`, default 32..1,024 ns); each wait is drawn from the upper half of the current window, so waiters do not retry in lockstep. Timing the wait keeps it the same on every core type: a pause costs 10.1 ns on a P-core and 21.9 ns on an E-core of the test host, so a cap counted in pauses would differ by 2.2x between them. Pure spin: a waiter never leaves the CPU. An uncontended acquire is a single CAS.
   - **`spin_lock_ttas_park`** — the same loop on the same `spinlock_ttas_t` (same init, same unlock), but once the backoff cap is reached every further failed CAS calls `nanosleep(1 us)`. Linux rounds that sleep up by the thread's timer slack (`/proc/self/timerslack_ns`, 50 us by default; real-time scheduling classes get zero slack), so a parked waiter is away for ~50 us while the holder re-acquires unopposed: throughput over fairness, and a policy the benchmark's `-S` flag makes visible.
   - **`spin_lock_mcs`** / **`spin_unlock_mcs`** — an MCS queue lock (tail swap via `xchg` / LSE `swpal` / LL-SC, hand-off via `stlr` / release store). Each waiter spins on its own cache line, so it is FIFO-fair and storm-free, at the cost of a cache-line transfer per hand-off; it convoys under oversubscription (a preempted successor stalls the whole queue). These single-argument wrappers use a per-thread node defined once in `spinlock.c` (`spin_mcs_thread_local_node`), so a lock taken in one translation unit may be released in another; they still must not nest, because one node can sit in only one queue at a time (the debug build aborts on a nested wrapper call). **`spin_lock_mcs_node(lock, node)`** / **`spin_unlock_mcs_node(lock, node)`** take an explicit, cache-line-aligned `mcs_node_t` and have neither limit:
     ```c
@@ -145,8 +145,8 @@ Run the binary directly from the command line. If no arguments are provided, def
 | `-t` | `<threads>` | **Thread Count**: Number of concurrent worker threads to spawn. | `4` |
 | `-i` | `<iters>` | **Iterations**: Number of critical section entries per thread. | `1,000,000` |
 | `-l` | `<loops>` | **Workload**: Number of `nop` instructions to execute inside the critical section (simulates load). | `500` |
-| `-m` | `<min>` | **Min Backoff**: Initial spin count for the exponential backoff algorithm. | `4` |
-| `-M` | `<max>` | **Max Backoff**: Cap of the exponential backoff spin count (pause iterations; ~10 ns each on this host). `ttas_park` sleeps 1 us per failed CAS once the cap is reached. | `16,000` |
+| `-m` | `<ns>` | **Min Backoff**: First backoff window after a failed CAS, in nanoseconds. | `32` |
+| `-M` | `<ns>` | **Max Backoff**: Cap of the doubling backoff window, in nanoseconds. `ttas_park` sleeps 1 us per failed CAS once the cap is reached. | `1,024` |
 | `-C` | `<cpulist>` | **Pin**: Bind workers round-robin to these cores (e.g. `0-3` or `0,2,4`) for deterministic one-thread-per-core placement. Pass at least as many cores as threads from one homogeneous class (all P or all E) to control P/E-core variance. | none |
 | `-K` | `<locks>` | **Contenders**: Comma-separated subset of `ttas,ttas_park,pspin,pmutex,mcs`, run in the given order. Drop `mcs` at thread counts that oversubscribe the cores, where the queue lock convoys. | all five |
 | `-S` | `<ns>` | **Timer slack**: `prctl(PR_SET_TIMERSLACK)` for the process before the workers start; it stretches every `nanosleep` of `ttas_park`. `0` restores the kernel default, the smallest value is `1`. The effective value is printed in the header. | inherited (50,000 ns) |
@@ -177,9 +177,9 @@ Simulate a scenario where the lock is held for a longer duration (10,000 nops), 
 ```
 
 #### 4. Tuning Backoff Algorithm
-Adjust the exponential backoff parameters to optimize for specific hardware (e.g., Intel Core Ultra or aarch64 Cortex/Neoverse cores).
+Set the backoff window in nanoseconds, here 64 ns doubling up to 4 us. The window is timed, so the same values hold on P-cores, E-cores and aarch64 cores.
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test -m 16 -M 4096
+./bin/x86_64-linux-gcc/release/spinlock_test -m 64 -M 4096
 ```
 
 #### 5. Controlled Run (pinning + contender selection)

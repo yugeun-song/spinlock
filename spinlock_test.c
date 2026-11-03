@@ -529,8 +529,8 @@ static inline void print_usage(const char *program_name)
             "  -t <threads>    Number of threads (Range: %d-%d, default: %d)\n"
             "  -i <iters>      Iterations per thread (Range: %d-%d, default: %d)\n"
             "  -l <loops>      Dummy Task Count (Mock NOP) (Range: %d-%d, default: %d)\n"
-            "  -m <min_spin>   Min spin backoff (Range: %d-%d, default: %d)\n"
-            "  -M <max_spin>   Max spin backoff (Range: %d-%d, default: %d)\n"
+            "  -m <ns>         Min TTAS backoff in ns (Range: %d-%d, default: %d)\n"
+            "  -M <ns>         Max TTAS backoff in ns (Range: %d-%d, default: %d)\n"
             "  -C <cpulist>    Pin workers to these cores round-robin, e.g. 0-3 or 0,2,4\n"
             "                  (deterministic placement; pass >= as many cores as threads\n"
             "                  from one homogeneous class to control P/E-core variance)\n"
@@ -545,8 +545,8 @@ static inline void print_usage(const char *program_name)
             "  -h              Show this help and exit\n",
             program_name, MIN_THREAD_COUNT, MAX_THREAD_COUNT, DEFAULT_THREAD_COUNT, MIN_ITERATIONS,
             MAX_ITERATIONS, DEFAULT_ITERATIONS, MIN_WORKLOAD_NOP_LOOPS, MAX_WORKLOAD_NOP_LOOPS,
-            DEFAULT_WORKLOAD_NOP_LOOPS, MIN_BACKOFF_PAUSES, MAX_BACKOFF_PAUSES, DEFAULT_SPIN_MIN,
-            MIN_BACKOFF_PAUSES, MAX_BACKOFF_PAUSES, DEFAULT_SPIN_MAX, MAX_PLACEMENT_PAGES - 1);
+            DEFAULT_WORKLOAD_NOP_LOOPS, MIN_BACKOFF_NS, MAX_BACKOFF_NS, DEFAULT_BACKOFF_MIN_NS,
+            MIN_BACKOFF_NS, MAX_BACKOFF_NS, DEFAULT_BACKOFF_MAX_NS, MAX_PLACEMENT_PAGES - 1);
 }
 
 static int parse_bounded_int(const char *argument_text, int minimum, int maximum, const char *option_name)
@@ -809,10 +809,10 @@ void bench_parse_args(int argc, char *argv[])
                 parse_bounded_int(optarg, MIN_WORKLOAD_NOP_LOOPS, MAX_WORKLOAD_NOP_LOOPS, "load_loops");
             break;
         case 'm':
-            g_conf_spin_min = parse_bounded_int(optarg, MIN_BACKOFF_PAUSES, MAX_BACKOFF_PAUSES, "spin_min");
+            g_conf_backoff_min_ns = parse_bounded_int(optarg, MIN_BACKOFF_NS, MAX_BACKOFF_NS, "backoff_min_ns");
             break;
         case 'M':
-            g_conf_spin_max = parse_bounded_int(optarg, MIN_BACKOFF_PAUSES, MAX_BACKOFF_PAUSES, "spin_max");
+            g_conf_backoff_max_ns = parse_bounded_int(optarg, MIN_BACKOFF_NS, MAX_BACKOFF_NS, "backoff_max_ns");
             break;
         case 'S':
             g_conf_timerslack_ns = parse_bounded_int(optarg, 0, INT_MAX, "timer_slack");
@@ -834,8 +834,9 @@ void bench_parse_args(int argc, char *argv[])
         }
     }
 
-    if (g_conf_spin_max < g_conf_spin_min) {
-        fprintf(stderr, "Error: Max spin backoff (%d) < Min spin backoff (%d)\n", g_conf_spin_max, g_conf_spin_min);
+    if (g_conf_backoff_max_ns < g_conf_backoff_min_ns) {
+        fprintf(stderr, "Error: Max backoff (%d ns) < Min backoff (%d ns)\n", g_conf_backoff_max_ns,
+                g_conf_backoff_min_ns);
         exit(EXIT_FAILURE);
     }
 
@@ -890,6 +891,7 @@ void bench_calibrate(void)
     }
     pthread_join(calibration_thread, NULL);
     g_measured_nop_ns = nop_calibration.nanoseconds_per_loop;
+    spin_calibrate_backoff_clock();
 }
 
 void bench_print_config(void)
@@ -922,14 +924,14 @@ void bench_print_config(void)
            "  Threads        : %d\n"
            "  Iterations     : %d\n"
            "  Dummy Tasks    : %d\n"
-           "  Backoff Range  : %d ~ %d\n"
+           "  Backoff Range  : %d ~ %d ns\n"
            "  Settle Delay   : %d ms (between tests)\n"
            "  Memory Lock    : %s\n"
            "  Pinning        : %s\n"
            "--------------------------------------\n\n",
            g_detected_cache_line_size, prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), g_measured_nop_ns,
-           g_conf_thread_count, g_conf_iterations, g_conf_workload_nop_loops, g_conf_spin_min,
-           g_conf_spin_max, SETTLE_DELAY_MS, g_memory_lock_status, pinning_description);
+           g_conf_thread_count, g_conf_iterations, g_conf_workload_nop_loops, g_conf_backoff_min_ns,
+           g_conf_backoff_max_ns, SETTLE_DELAY_MS, g_memory_lock_status, pinning_description);
 }
 
 void bench_warmup_all(void)

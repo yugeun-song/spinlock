@@ -20,7 +20,7 @@
 #define CHECK_MIN_THREAD_COUNT 2
 #define CHECK_ITERATIONS_PER_THREAD 100000
 #define CHECK_HOLD_PAUSE_COUNT 16
-#define CHECK_PARK_FORCING_SPIN_MAX 8
+#define CHECK_PARK_FORCING_BACKOFF_MAX_NS 8
 
 struct contended_lock_pair {
     spinlock_ttas_t ttas_lock;
@@ -434,28 +434,28 @@ static void check_backoff_cap_boundaries(void)
 {
     const char *check_name = "ttas backoff survives extreme cap values";
     spinlock_ttas_t lock;
-    const int saved_spin_min = g_conf_spin_min;
-    const int saved_spin_max = g_conf_spin_max;
+    const int saved_backoff_min_ns = g_conf_backoff_min_ns;
+    const int saved_backoff_max_ns = g_conf_backoff_max_ns;
 
     spin_init_ttas(&lock);
 
-    g_conf_spin_min = 1;
-    g_conf_spin_max = 1;
+    g_conf_backoff_min_ns = 1;
+    g_conf_backoff_max_ns = 1;
     spin_lock_ttas(&lock);
     spin_unlock_ttas(&lock);
 
-    g_conf_spin_min = INT_MAX;
-    g_conf_spin_max = INT_MAX;
+    g_conf_backoff_min_ns = INT_MAX;
+    g_conf_backoff_max_ns = INT_MAX;
     spin_lock_ttas(&lock);
     spin_unlock_ttas(&lock);
 
-    g_conf_spin_min = 16;
-    g_conf_spin_max = 4;
+    g_conf_backoff_min_ns = 16;
+    g_conf_backoff_max_ns = 4;
     spin_lock_ttas(&lock);
     spin_unlock_ttas(&lock);
 
-    g_conf_spin_min = saved_spin_min;
-    g_conf_spin_max = saved_spin_max;
+    g_conf_backoff_min_ns = saved_backoff_min_ns;
+    g_conf_backoff_max_ns = saved_backoff_max_ns;
     report_pass(check_name);
 }
 
@@ -485,11 +485,11 @@ static void check_struct_layout(void)
 
 static void check_ttas_park_contended(void)
 {
-    const int saved_spin_max = g_conf_spin_max;
-    g_conf_spin_max = CHECK_PARK_FORCING_SPIN_MAX;
+    const int saved_backoff_max_ns = g_conf_backoff_max_ns;
+    g_conf_backoff_max_ns = CHECK_PARK_FORCING_BACKOFF_MAX_NS;
     run_contended_check("ttas_park contended, cap forced low so waiters park", acquire_ttas_park,
                         release_ttas, 0);
-    g_conf_spin_max = saved_spin_max;
+    g_conf_backoff_max_ns = saved_backoff_max_ns;
 }
 
 #if defined(SPINLOCK_DEBUG)
