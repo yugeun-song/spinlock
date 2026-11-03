@@ -235,79 +235,115 @@ Use `make distclean` to scrub every debugger / profiler / tracer artifact (cores
 The release build (`./bin/<arch>-linux-gcc/release/spinlock_test`, or whatever `--binary` names) is what `test_bench.py` exercises and what produces the headline numbers below.
 
 ## Benchmark Results
-*Test environment: Intel Core Ultra 5 226V (4 P-cores @ 4.5 GHz + 4 E-cores @ 3.5 GHz), Arch Linux, kernel `7.2.6-arch2-1`, GCC 16.2.1 release build (`-O3`), default timer slack 50,000 ns (`/proc/self/timerslack_ns`). Workers pinned to the four P-cores (`-C 0-3`). Every number below is the median of 5 runs of `./bin/x86_64-linux-gcc/release/spinlock_test`, 1,000,000 iterations per thread unless stated; `ns/acq` is elapsed time divided by the total number of acquisitions. On this core a `pause` costs ≈ 10.4 ns, so the default backoff cap `-M 16000` is a ≈ 167 us spin between two CAS attempts, and the measured NOP cost is 0.111 ns.*
+*Test environment: Intel Core Ultra 5 226V (4 P-cores @ 4.5 GHz + 4 E-cores @ 3.5 GHz), Arch Linux, kernel `7.2.14-arch1-1`, GCC 16.2.1 release build (`-O3`), default timer slack 50,000 ns (`/proc/self/timerslack_ns`). Workers pinned to the four P-cores (`-C 0-3`). Each number is the median over 5 launches (3 for the longer critical section), each launch the geometric mean of 4 placement pages (`-P 0-3`), 1,000,000 iterations per thread and `-o 0` unless stated. `ns/acq` is elapsed time divided by the total number of acquisitions, and `min/max` is the median ratio of the earliest to the latest thread completion. The measured NOP cost is 0.111 ns.*
 
-**What the harness rewards.** Each thread performs a fixed number of acquisitions and the elapsed time is the wall time until the *last* thread finishes; there is no fairness term. On the same four cores every lock pays the same physical cost for a contended hand-off: the lock word (or the MCS flag) has to move between cores, ≈ 90–100 ns per acquisition here, which is exactly where the POSIX spinlock, the POSIX mutex and MCS all land. Two locks that hand the lock over on every acquisition therefore cannot differ by 5–11x on this machine. A lock that finishes several times sooner is doing different work: its waiters stay away from the lock (a 167 us backoff spin, a 50 us park) while one thread re-acquires uncontended at ≈ 9 ns, and the fixed-iteration metric rewards that. The fairness column exposes it — `min/max` is the ratio of the earliest to the latest per-thread completion time; `1.00` means the lock was handed around evenly, `0.4–0.6` means one thread ran through while the others waited.
+**What the harness rewards.** Each thread performs a fixed number of acquisitions and the elapsed time is the wall time until the *last* thread finishes; there is no fairness term. On the same four cores a contended hand-off costs every lock about the same, because the lock word (or the MCS flag) has to move between cores: ≈ 85–105 ns per acquisition here for the POSIX spinlock, the POSIX mutex and MCS. A lock that finishes several times sooner is doing different work: its waiters stay away from the lock while one thread re-acquires uncontended at ≈ 9 ns. The `min/max` column exposes it; `1.00` means the lock was handed around evenly, `0.4–0.6` means one thread ran through while the others waited.
 
-### 4 threads, empty critical section (`-t 4 -C 0-3 -l 0`)
+### Default run (`-t 4`: ≈ 50 ns inside the lock, ≈ 150 ns outside it)
 
-| Lock | Elapsed (ms) | ns/acq | Fairness min (ms) | max (ms) | min/max |
-| :--- | ---: | ---: | ---: | ---: | ---: |
-| `ttas` (pure spin, `-M 16000`) | 36.7 | 9.2 | 19.2 | 36.7 | 0.59 |
-| `ttas_park` (spin, then 1 us park) | 47.8 | 11.9 | 16.8 | 47.7 | 0.39 |
-| `pspin` (`pthread_spin_lock`) | 360.8 | 90.2 | 268.7 | 360.8 | 0.70 |
-| `pmutex` (`pthread_mutex_lock`) | 402.4 | 100.6 | 382.0 | 402.4 | 0.95 |
-| `mcs` | 402.0 | 100.5 | 401.7 | 401.9 | 1.00 |
+| Lock | Elapsed (ms) | ns/acq | min/max |
+| :--- | ---: | ---: | ---: |
+| `ttas` | 716.5 | 179.1 | 0.93 |
+| `ttas_park` | 634.1 | 158.5 | 0.85 |
+| `pspin` | 859.2 | 214.8 | 0.93 |
+| `pmutex` | 1,081.6 | 270.4 | 0.97 |
+| `mcs` | 612.8 | 153.2 | 1.00 |
 
-`pspin` at 4 threads is bimodal from run to run (≈ 260 ms at min/max ≈ 0.2, or ≈ 400 ms at ≈ 0.7); the median above fell on the slower mode.
+With work outside the lock the lock is busy most of the time but not saturated, so the hand-off decides. MCS is fastest: each release passes the lock to one known waiter. `ttas` is 1.20x ahead of `pthread_spin_lock` at the same fairness, `ttas_park` gains by parking waiters, and the mutex pays a futex wake per contended hand-off.
 
-The 9 ns/acq of `ttas` is close to the uncontended single-thread cost (6 ns): with the 167 us backoff every CAS miss removes a waiter for tens of thousands of acquisitions, so the four threads effectively run one after another. Removing the sleep does not remove that; the backoff cap does (see the `-M` sweep below).
+### 4 threads, empty critical section (`-t 4 -l 0 -o 0`)
+
+| Lock | Elapsed (ms) | ns/acq | min/max |
+| :--- | ---: | ---: | ---: |
+| `ttas` (timed backoff, 32–1,024 ns) | 256.6 | 64.2 | 0.95 |
+| `ttas_park` (spin, then 1 us park) | 38.7 | 9.7 | 0.63 |
+| `pspin` (`pthread_spin_lock`) | 337.4 | 84.4 | 0.66 |
+| `pmutex` (`pthread_mutex_lock`) | 415.1 | 103.8 | 0.95 |
+| `mcs` | 402.4 | 100.6 | 1.00 |
+
+`ttas` hands the lock around (0.95) and is still 1.3x faster than `pthread_spin_lock`, whose waiters never back off and keep bouncing the lock line: that is the benefit of TTAS with backoff. `ttas_park` is 7x faster than `ttas` only because its waiters sleep ≈ 50 us while one thread runs through (0.63).
 
 ### Timer slack (`-S`)
 
-`ttas_park` sleeps 1 us per failed CAS once the cap is reached, and Linux rounds `nanosleep` up by the timer slack. Measured on a P-core, `nanosleep(1 us)` returns after ≈ 50 us at the default slack and after a few microseconds at `-S 1000` or `-S 1`. Note that `prctl(PR_SET_TIMERSLACK, 0)` *restores the kernel default* (the header shows `Timer Slack : 50000 ns` for `-S 0`); `-S 1` is the smallest slack, and real-time scheduling classes get zero slack without any flag.
+`ttas_park` sleeps 1 us per failed CAS once the backoff cap is reached, and Linux rounds `nanosleep` up by the timer slack. Note that `prctl(PR_SET_TIMERSLACK, 0)` *restores the kernel default* (the header shows `Timer Slack : 50000 ns` for `-S 0`); `-S 1` is the smallest slack, and real-time scheduling classes get zero slack without any flag.
 
-| `-t 4 -l 0`, lock | slack 50,000 ns | slack 1,000 ns | slack 1 ns |
+| `-t 4 -l 0 -o 0`, lock | slack 50,000 ns | slack 1,000 ns | slack 1 ns |
 | :--- | ---: | ---: | ---: |
-| `ttas_park` elapsed (ms) / min/max | 47.8 / 0.39 | 45.5 / 0.54 | 46.4 / 0.55 |
-| `ttas` elapsed (ms) / min/max | 36.7 / 0.59 | 32.6 / 0.48 | 31.1 / 0.45 |
+| `ttas_park` elapsed (ms) / min/max | 37.8 / 0.65 | 99.3 / 0.84 | 128.1 / 0.86 |
+| `ttas` elapsed (ms) / min/max (no sleep, reference) | 258.4 / 0.95 | 255.4 / 0.94 | 260.1 / 0.94 |
 
-With the default `-M 16000` the park is a 50 us tail on a 167 us spin, so the slack barely moves the total. It dominates once the backoff is short:
-
-| `-t 4 -l 0 -M 64`, lock | slack 50,000 ns | slack 1,000 ns | slack 1 ns |
-| :--- | ---: | ---: | ---: |
-| `ttas_park` elapsed (ms) / min/max | 43.7 / 0.75 | 78.2 / 0.71 | 97.3 / 0.69 |
-| `ttas` elapsed (ms) / min/max (no sleep, reference) | 199.0 / 0.90 | 188.7 / 0.88 | 191.8 / 0.90 |
-
-With `-M 64` the park is the whole wait and the slack sets its length: over 2,000 samples on a P-core, `nanosleep(1 us)` returns after a median of 52.0 us at the default slack, 3.1 us at `-S 1000` and 1.9 us at `-S 1`. Shortening it brings the parked waiters back sooner, and `ttas_park` goes from 43.7 ms to 97.3 ms (2.2x) with no code change, while the pure-spin `ttas` reference stays at ≈ 190 ms. A `ttas_park` result is therefore a property of the kernel's timer slack as much as of the lock; report `-S` (or the header's `Timer Slack`) with it.
+With the 1 us backoff cap the park is the whole wait, and the slack sets its length: over 2,000 samples on a P-core, `nanosleep(1 us)` returns after a median of 52.0 us at the default slack, 3.1 us at `-S 1000` and 1.9 us at `-S 1`. Shortening it brings the parked waiters back sooner, and `ttas_park` goes from 37.8 ms to 128.1 ms (3.4x) with no code change, while the pure-spin `ttas` stays at ≈ 258 ms. A `ttas_park` result is therefore a property of the kernel's timer slack as much as of the lock; report `-S` (or the header's `Timer Slack`) with it.
 
 ### Backoff cap (`-M`, 4 threads, empty critical section)
 
-| `-M` (pause iterations ≈ spin time) | `ttas` elapsed (ms) / ns/acq / min/max | `ttas_park` elapsed (ms) / min/max | `pspin` elapsed (ms) / min/max |
+| `-M` (ns) | `ttas` elapsed (ms) / ns/acq / min/max | `ttas_park` elapsed (ms) / min/max | `pspin` elapsed (ms) / min/max |
 | :--- | ---: | ---: | ---: |
-| 64 (≈ 0.7 us) | 199.0 / 49.7 / **0.90** | 43.7 / 0.75 | 348.6 / 0.49 |
-| 1,024 (≈ 11 us) | 44.8 / 11.2 / 0.46 | 52.5 / 0.65 | 345.1 / 0.64 |
-| 16,000 (≈ 167 us, default) | 36.7 / 9.2 / 0.59 | 47.8 / 0.39 | 360.8 / 0.70 |
+| 256 | 324.0 / 81.0 / 0.94 | 34.9 / 0.75 | 373.8 / 0.68 |
+| 1,024 (default) | 256.3 / 64.1 / 0.94 | 37.8 / 0.71 | 366.7 / 0.70 |
+| 8,192 | 95.0 / 23.7 / 0.68 | 43.2 / 0.73 | 326.5 / 0.66 |
+| 65,536 | 40.9 / 10.2 / 0.51 | 42.7 / 0.57 | 355.1 / 0.69 |
+| 167,000 | 37.5 / 9.4 / 0.49 | 37.4 / 0.55 | 370.6 / 0.68 |
 
-This is the like-for-like comparison of the two pure spinlocks. With a sub-microsecond cap `ttas` hands the lock around (min/max 0.90) and still finishes 1.75x sooner than `pthread_spin_lock`, whose waiters never back off and keep bouncing the lock line: that is the real benefit of TTAS with backoff. Raising the cap to 1,024 pauses turns the same lock into a serialiser: 4x "faster" at min/max 0.46. `ttas_park` serialises at every cap because its ≈ 50 us park outlasts all of these spins. The `-M 64` rows at 1,000 ns and 1 ns slack are in the timer-slack section above.
+Up to a microsecond `ttas` hands the lock around and beats `pthread_spin_lock`; from ≈ 8 us it becomes a serialiser, several times "faster" at min/max 0.5–0.7. The previous default, 16,000 pauses (≈ 167 us on a P-core, ≈ 351 us on an E-core), sat at that end. In the sweep below the 1 us cap is 3–6% behind `pthread_spin_lock` at 256 NOPs with 2–8 threads and ahead of it or level everywhere else.
 
-### Oversubscription on the four P-cores (`-t 8` and `-t 16`, `-l 0`)
+### Oversubscription on the four P-cores (`-t 8` and `-t 16`, `-l 0 -o 0`)
 
 | Lock | 8 threads: elapsed (ms) | ns/acq | min/max | 16 threads: elapsed (ms) | ns/acq | min/max |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `ttas` | 99.8 | 12.5 | 0.39 | 456.6 | 28.5 | 0.38 |
-| `ttas_park` | 143.7 | 18.0 | 0.39 | 399.2 | 24.9 | 0.45 |
-| `pspin` | 1,284.9 | 160.6 | 0.68 | 4,963.7 | 310.2 | 0.60 |
-| `pmutex` | 731.1 | 91.4 | 0.97 | 1,603.7 | 100.2 | 0.84 |
-| `mcs` (10,000 / 5,000 iterations per thread) | 39,290 | 491,000 | 0.65 | 129,543 | 1,619,000 | 0.43 |
+| `ttas` | 955.0 | 119.4 | 0.93 | 3,490.8 | 218.2 | 0.87 |
+| `ttas_park` | 288.7 | 36.1 | 0.75 | 7,200.5 | 450.0 | 0.81 |
+| `pspin` | 1,362.5 | 170.3 | 0.66 | 4,997.5 | 312.3 | 0.61 |
+| `pmutex` | 729.8 | 91.2 | 0.96 | 1,603.9 | 100.2 | 0.88 |
+| `mcs` (10,000 / 5,000 iterations per thread) | 50,469 | 630,865 | 1.00 | 98,398 | 1,229,978 | 0.00 |
 
-Once threads outnumber cores the lock holder gets preempted. The POSIX spinlock's waiters spin through their whole timeslice (160 → 310 ns/acq); the mutex parks them in the kernel and stays at ≈ 100 ns/acq, so `pmutex` beats `pspin` by 1.8x at 8 threads and 3.1x at 16. MCS collapses: a preempted successor stalls the whole queue for a scheduler quantum, ≈ 0.5 ms per acquisition at 8 threads and 1.6 ms at 16 (measured with 10,000 and 5,000 iterations per thread; a 1,000,000-iteration run would take about an hour), which is why the sweep drops it above the core budget. `ttas` and `ttas_park` still post the smallest elapsed times, but at min/max ≈ 0.4: they serialise the threads rather than scale. `ttas_park` overtakes `ttas` at 16 threads because a parked waiter gives its core back to the holder.
+Once threads outnumber cores the lock holder gets preempted. The POSIX spinlock's waiters spin through their whole timeslice (170 → 312 ns/acq); the mutex parks them in the kernel and stays at ≈ 100 ns/acq. `ttas` stays fair and ahead of `pspin` but behind the mutex. `ttas_park` is the fastest at 8 threads and the slowest at 16. MCS collapses: a preempted successor stalls the whole queue for a scheduler quantum, ≈ 0.6 ms per acquisition at 8 threads and 1.2 ms at 16 (one launch, one page each), which is why the sweep drops it above the core budget.
 
-### A longer critical section (`-t 4 -l 4096`, ≈ 0.46 us held)
+### A longer critical section (`-t 4 -l 4096 -o 0`, ≈ 0.46 us held)
 
 | Lock | 1 thread (ms) | 4 threads (ms) | min/max |
 | :--- | ---: | ---: | ---: |
-| `ttas` | 472.6 | 2,143.8 | 0.55 |
-| `ttas_park` | 470.6 | 2,144.4 | 0.52 |
-| `pspin` | 472.6 | 2,090.7 | 0.37 |
-| `pmutex` | 479.2 | 3,430.9 | 0.98 |
-| `mcs` | 471.2 | 2,657.8 | 1.00 |
+| `ttas` | 468.4 | 2,085.3 | 0.41 |
+| `ttas_park` | 468.3 | 2,079.7 | 0.40 |
+| `pspin` | 470.5 | 2,103.9 | 0.46 |
+| `pmutex` | 473.8 | 3,416.2 | 0.98 |
+| `mcs` | 470.0 | 2,624.0 | 1.00 |
 
-The critical section dominates: 4 × 472 ms = 1,889 ms of serialised work is the floor. The three spinlocks land within 11–14% of it and their ordering is gone (`ttas`/`pspin` = 0.98x). MCS adds ≈ 190 ns per hand-off, the mutex ≈ 385 ns: with a 0.46 us hold every acquisition is contended, so every mutex hand-off goes through a futex wake. The spinlocks' min/max stays at 0.4–0.55 because a released lock goes to whichever waiter sees it first, and the backoff still delays the losers.
+The critical section dominates: 4 × 468 ms = 1,873 ms of serialised work is the floor. The three spinlocks land within 11–12% of it and their ordering is gone (`ttas`/`pspin` = 0.99x). MCS adds ≈ 186 ns per hand-off, the mutex ≈ 380 ns: with a 0.46 us hold every acquisition is contended, so every mutex hand-off goes through a futex wake. The spinlocks' min/max stays at 0.4–0.5 because a released lock goes to whichever waiter sees it first.
 
-### Uncontended cost (`-t 1 -l 0`, ns per lock/unlock pair)
+### Uncontended cost (`-t 1 -l 0 -o 0`, ns per lock/unlock pair)
 
-`ttas` 6.1 · `ttas_park` 8.2 · `pspin` 7.7 · `pmutex` 13.4 · `mcs` 14.6. Single-threaded, the custom TTAS lock is 1.6 ns ahead of `pthread_spin_lock`; under contention its honest advantage is the `-M 64` row of the backoff-cap table, not the default-cap headline.
+`ttas` 6.1 · `ttas_park` 6.1 · `pspin` 7.6 · `pmutex` 13.2 · `mcs` 14.5. Single-threaded, the custom TTAS lock is 1.6 ns ahead of `pthread_spin_lock`.
+
+### Core types and contention levels
+
+*Each cell: 7 launches × 4 pages, 300,000 iterations per thread, workers pinned to the listed CPUs (the mixed set alternates P- and E-cores). Work inside and outside the lock is sized in nanoseconds with each class's NOP cost (0.1115 ns on a P-core, 0.1432 ns on an E-core); the mixed set uses the P-core size, so the same work takes 1.28x longer on its E-cores. Ratios are paired per launch, and **bold** marks a ratio significant at a 5% false discovery rate over all 45 cells.*
+
+`pspin`/`ttas` elapsed-time ratio (>1 = `ttas` finished sooner):
+
+| Inside / outside the lock (ns) | P-cores 0-3, 2 thr | P-cores 0-3, 4 thr | P-cores 0-3, 8 thr | E-cores 4-7, 2 thr | E-cores 4-7, 4 thr | E-cores 4-7, 8 thr | P and E mixed, 2 thr | P and E mixed, 4 thr | P and E mixed, 8 thr |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 / 0 (saturated) | **4.15x** | **1.33x** | **1.50x** | 0.79x | 0.83x | 0.91x | 1.21x | 1.03x | **1.05x** |
+| 50 / 0 (saturated) | **1.02x** | 1.01x | 1.00x | 1.00x | **1.03x** | 1.02x | **0.97x** | 1.00x | 1.03x |
+| 50 / 150 (default) | **1.01x** | **1.21x** | **1.29x** | **1.01x** | **0.98x** | **1.07x** | **0.81x** | 1.03x | **0.75x** |
+| 50 / 1,000 | 1.00x | 1.00x | **1.12x** | **1.00x** | **1.00x** | 1.02x | **0.95x** | **0.98x** | 1.20x |
+| 200 / 600 | 1.00x | 1.06x | **1.07x** | 1.00x | **1.01x** | **1.05x** | 0.96x | **1.09x** | **1.29x** |
+
+Fastest lock (two names = not significantly apart, 5% false discovery rate over 45 cells):
+
+| Inside / outside the lock (ns) | P-cores 0-3, 2 thr | P-cores 0-3, 4 thr | P-cores 0-3, 8 thr | E-cores 4-7, 2 thr | E-cores 4-7, 4 thr | E-cores 4-7, 8 thr | P and E mixed, 2 thr | P and E mixed, 4 thr | P and E mixed, 8 thr |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 / 0 (saturated) | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` |
+| 50 / 0 (saturated) | `ttas` = `ttas_park` | `pspin` = `ttas_park` | `ttas` = `pspin` | `ttas_park` | `ttas_park` | `ttas_park` = `ttas` | `pspin` = `ttas_park` | `ttas_park` = `ttas` | `ttas_park` = `ttas` |
+| 50 / 150 (default) | `ttas` = `ttas_park` | `mcs` | `ttas` = `pmutex` | `ttas` | `ttas_park` | `ttas` | `pspin` | `ttas_park` | `ttas_park` |
+| 50 / 1,000 | `ttas` = `pspin` | `ttas` = `pspin` | `pmutex` | `ttas` | `ttas` = `ttas_park` | `pmutex` | `pspin` | `pspin` | `mcs` = `ttas` |
+| 200 / 600 | `ttas` = `pspin` | `ttas_park` = `ttas` | `ttas_park` = `ttas` | `pspin` = `ttas` | `ttas` | `pmutex` | `pspin` = `ttas` | `mcs` = `ttas` | `ttas_park` |
+
+Each cell is a direct harness run, `-C <cpus> -t <threads> -l <nops> -o <nops> -i 300000 -P 0-3`.
+
+- **One class of fast cores** (what the default pinning picks): `ttas` is never significantly behind `pthread_spin_lock`, and it is ahead whenever many threads contend, saturated or not.
+- **E-cores only**: these share one L2 and have no L3 on this part, so a hand-off costs ≈ 17–25 ns instead of ≈ 50–85 ns on the P-cores. The two spinlocks are level in most cells. The largest gaps are `ttas` 5–7% ahead at 8 threads and `pthread_spin_lock` 9–21% ahead, not significantly, on the saturated empty critical section.
+- **P- and E-cores mixed**: here `ttas` loses. At the default load `pthread_spin_lock` finished sooner at 2 and 8 threads, by 19% and 25% here and by 5% and 13% in a separate 9-launch replication; at light contention it was ahead by 2–5%. Keep the workers on one core class, as the default pinning does.
+- **No lock wins everywhere**: `ttas_park` wins every saturated empty critical section by parking its waiters, MCS wins the default load on 4 P-cores, and the mutex wins at 8 threads on 4 cores with 1 us of work outside the lock.
 
 ## Automated Benchmarking & Visualization
 
