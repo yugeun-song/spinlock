@@ -24,9 +24,9 @@ This project provides custom spinlocks using architecture-specific inline assemb
 - **Compilers**: GCC or Clang (Standard: `gnu99`)
 - **Build System**: CMake with Ninja Multi-Config presets, driven by `build.cmake` through `make`, `./build.sh` or `cmake -P build.cmake --`
 - **Build Modes** (`cmake/flags.cmake`, shared with the other repositories that build with CMake; every mode adds `-Wall -Wextra -pedantic -Wshadow` and this project's `-Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings -Wvla -Wundef -Wnull-dereference -Wimplicit-fallthrough -Wdouble-promotion -Wconversion -Wsign-conversion`):
-  - **Debug**: `-O0 -ggdb3 -fno-inline -fno-optimize-sibling-calls -fno-omit-frame-pointer -DSPINLOCK_DEBUG`, no injected hardening, no PIE, `-rdynamic`, `-pg` — every `static inline` helper resolves to a real call frame so `uftrace`, `gdb`, `strace`, and `perf` can step into each function. `SPINLOCK_DEBUG` compiles in misuse checks that abort at the offending call.
+  - **Debug**: `-O0 -ggdb3 -fno-inline -fno-optimize-sibling-calls -fno-omit-frame-pointer -DSPINLOCK_DEBUG`, no default hardening, no PIE, `-rdynamic`, `-pg` — every `static inline` helper resolves to a real call frame so `uftrace`, `gdb`, `strace`, and `perf` can step into each function. `SPINLOCK_DEBUG` compiles in misuse checks that abort at the offending call.
   - **Sanitize**: Debug plus `-fsanitize=address` (or the list in `SANITIZE=`), `-fno-sanitize-recover=all` and `-ftls-model=local-exec`, which avoids a GCC 16 `-fsanitize=null` false positive when `undefined` is in the list (see [Validators](#validators)). Toolchains without sanitizer runtimes skip it with a note.
-  - **Release**: `-O2 -g`, `-fstack-protector-strong -fstack-clash-protection -D_FORTIFY_SOURCE=3`, `-fcf-protection=full` or `-mbranch-protection=standard`, frame pointers, PIE, full RELRO and LTO, as distributions ship. The benchmark tables below were measured with the earlier `-O3` release build.
+  - **Release**: `-O2 -g`, `-fstack-protector-strong -fstack-clash-protection -D_FORTIFY_SOURCE=3`, `-fcf-protection=full` or `-mbranch-protection=standard`, frame pointers, PIE, full RELRO and link-time optimization (LTO), as distributions ship. The benchmark tables below were measured with the earlier `-O3` release build.
 - **Warnings**: no errors under either compiler. The only warnings are intentional unused ones: `-Wunused-parameter` on the check suite's shared-signature lock callbacks and `-Wunused-function` on `report_skip` in `SPINLOCK_DEBUG` builds. They are never silenced (no `(void)` casts, unused attributes or `-Wno-*` flags); every other warning is fixed.
 - **Code Style**: the [c-programming coding style](https://github.com/yugeun-song/c-programming/blob/main/docs/coding-style.md). `.clang-format` holds its formatting part; naming, pointer parameters, explicit comparisons and the other rules are kept by hand. The contender table `gs_contenders` sits with the other file-scope variables, after forward declarations of the worker routines it points to.
 
@@ -36,7 +36,7 @@ Each program goes to `bin/<arch>-linux-<compiler>-<config>/`, so GCC, Clang and 
 
 ```bash
 make                  # Debug and Sanitize (all); one Ninja job per CPU
-make PROFILE=release  # Release instead; index, unused, tidy and lsp-check take its flags too
+make PROFILE=release  # Release instead; index, unused, tidy and clangd-check take its flags too
 make release          # bin/<arch>-linux-<compiler>-release/{spinlock_test,spinlock_check}
 make debug            # bin/<arch>-linux-<compiler>-debug/{spinlock_test,spinlock_check}
 make sanitize         # the Sanitize build, address by default; make sanitize SANITIZE=address,undefined
@@ -45,7 +45,7 @@ make check            # build every config the toolchain can link and run the te
 make index            # compile_commands.json with the PROFILE flags, tags and cscope.out in the root;
                       # later builds rewrite compile_commands.json when its flags change
 make clean-index      # remove them again
-make lsp-check        # let clangd parse every file and print its errors
+make clangd-check     # let clangd parse every file and print its errors
 make tidy             # clang-tidy over every translation unit with .clang-tidy
 make unused           # unused diagnostics (clang) and unused functions (cppcheck)
 make clean            # remove bin/ and the build products; configured trees stay configured
@@ -53,7 +53,7 @@ make distclean        # clean, the index, build/, caches and every debugger / pr
 make help             # the goals, the variables and the presets this host can build
 ```
 
-`./build.sh` and `cmake -P build.cmake --` take the same verbs, a preset name, `PROFILE=` and `SANITIZE=`. Each verb ends with a `=>` line that names what it produced, and configure reports the probed flags in the same form whenever they change. Several goals run one at a time in the given order, so `make clean all` is safe. `make all` never runs tests: concurrent stress tests oversubscribe the cores (three check binaries together ran past 120 s, versus 2–3 s alone). `make check` runs `spinlock_check` and a short benchmark whose atomic counts must all be OK, in Debug, Sanitize and Release.
+`./build.sh` and `cmake -P build.cmake --` take the same commands, a preset name, `PROFILE=` and `SANITIZE=`. Each command ends with a `=>` line that names what it produced, and configure reports the probed flags in the same form whenever they change. Several goals run one at a time in the given order, so `make clean all` is safe. `make all` never runs tests: concurrent stress tests oversubscribe the cores (three check binaries together ran past 120 s, versus 2–3 s alone). `make check` runs `spinlock_check` and a short benchmark whose atomic counts must all be OK, in Debug, Sanitize and Release.
 
 ### Editor integration: clangd, ctags, cscope
 
