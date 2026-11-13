@@ -36,21 +36,23 @@ Each program goes to `bin/<arch>-linux-<compiler>-<config>/`, so GCC, Clang and 
 
 ```bash
 make                  # Debug and Sanitize (all); one Ninja job per CPU
+make PROFILE=release  # Release instead; index, unused, tidy and lsp-check take its flags too
 make release          # bin/<arch>-linux-<compiler>-release/{spinlock_test,spinlock_check}
 make debug            # bin/<arch>-linux-<compiler>-debug/{spinlock_test,spinlock_check}
 make sanitize         # the Sanitize build, address by default; make sanitize SANITIZE=address,undefined
 make CC=clang         # the same with Clang; PRESET=<preset> picks any preset in CMakePresets.json
 make check            # build every config the toolchain can link and run the tests in each
-make index            # compile_commands.json, tags and cscope.out in the source root
+make index            # compile_commands.json with the PROFILE flags, tags and cscope.out in the root
 make clean-index      # remove them again
 make lsp-check        # let clangd parse every file and print its errors
 make tidy             # clang-tidy over every translation unit with .clang-tidy
 make unused           # unused diagnostics (clang) and unused functions (cppcheck)
 make clean            # remove bin/ and the build products; configured trees stay configured
 make distclean        # clean, the index, build/, caches and every debugger / profiler artifact
+make help             # the goals, the variables and the presets this host can build
 ```
 
-`./build.sh` and `cmake -P build.cmake --` take the same verbs, a preset name and `SANITIZE=`. Several goals run one at a time in the given order, so `make clean all` is safe. `make all` never runs tests: concurrent stress tests oversubscribe the cores (three check binaries together ran past 120 s, versus 2–3 s alone). `make check` runs `spinlock_check` and a short benchmark whose atomic counts must all be OK, in Debug, Sanitize and Release.
+`./build.sh` and `cmake -P build.cmake --` take the same verbs, a preset name, `PROFILE=` and `SANITIZE=`. Each verb ends with a `=>` line that names what it produced, and configure reports the probed flags in the same form whenever they change. Several goals run one at a time in the given order, so `make clean all` is safe. `make all` never runs tests: concurrent stress tests oversubscribe the cores (three check binaries together ran past 120 s, versus 2–3 s alone). `make check` runs `spinlock_check` and a short benchmark whose atomic counts must all be OK, in Debug, Sanitize and Release.
 
 ### Editor integration: clangd, ctags, cscope
 
