@@ -2,8 +2,11 @@
 # Removed checks are noise on this code base, not bugs: printf return values
 # (cert-err33-c), getopt/strtol/exit flagged as not thread-safe from a
 # single-threaded main (concurrency-mt-unsafe), the '#if defined(...)' chains
-# that keep '#elif' legible (use-concise-preprocessor-directives), _GNU_SOURCE
-# (reserved-identifier), and clangd already runs its own include cleaner.
+# that keep '#elif' legible (use-concise-preprocessor-directives), and clangd
+# already runs its own include cleaner, and inline assembly is what this code
+# studies (no-assembler). Two checks contradict the coding style:
+# a const parameter keeps its const in the declaration (avoid-const-params-in-decls),
+# and only tables that grow end with a comma (trailing-comma).
 Checks: >
   -*,
   bugprone-*,
@@ -12,9 +15,9 @@ Checks: >
   misc-*,
   performance-*,
   portability-*,
+  -portability-no-assembler,
   readability-*,
   -bugprone-easily-swappable-parameters,
-  -bugprone-reserved-identifier,
   -cert-dcl37-c,
   -cert-dcl51-cpp,
   -cert-err33-c,
@@ -23,8 +26,12 @@ Checks: >
   -readability-braces-around-statements,
   -readability-function-cognitive-complexity,
   -readability-identifier-length,
+  -readability-avoid-const-params-in-decls,
   -readability-magic-numbers,
+  -readability-trailing-comma,
   -readability-use-concise-preprocessor-directives
 WarningsAsErrors: ''
 HeaderFilterRegex: '.*'
+CheckOptions:
+  bugprone-reserved-identifier.AllowedIdentifiers: '_GNU_SOURCE;_POSIX_C_SOURCE;_DEFAULT_SOURCE'
 FormatStyle: file
