@@ -42,7 +42,8 @@ make debug            # bin/<arch>-linux-<compiler>-debug/{spinlock_test,spinloc
 make sanitize         # the Sanitize build, address by default; make sanitize SANITIZE=address,undefined
 make CC=clang         # the same with Clang; PRESET=<preset> picks any preset in CMakePresets.json
 make check            # build every config the toolchain can link and run the tests in each
-make index            # compile_commands.json with the PROFILE flags, tags and cscope.out in the root
+make index            # compile_commands.json with the PROFILE flags, tags and cscope.out in the root;
+                      # later builds rewrite compile_commands.json when its flags change
 make clean-index      # remove them again
 make lsp-check        # let clangd parse every file and print its errors
 make tidy             # clang-tidy over every translation unit with .clang-tidy
