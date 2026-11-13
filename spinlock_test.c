@@ -839,20 +839,24 @@ static struct contender_measurement run_contender(struct contended_objects *cons
     spin_init_ttas(&mut_objects->ttas_lock);
     spin_init_mcs(&mut_objects->mcs_lock);
     mut_objects->shared_counter.value = 0;
-    if (pthread_spin_init(posix_spinlock, PTHREAD_PROCESS_PRIVATE) != 0) {
-        perror("pthread_spin_init");
+    const int spin_init_result = pthread_spin_init(posix_spinlock, PTHREAD_PROCESS_PRIVATE);
+    if (spin_init_result != 0) {
+        fprintf(stderr, "pthread_spin_init: %s\n", strerror(spin_init_result));
         exit(EXIT_FAILURE);
     }
-    if (pthread_mutex_init(posix_mutex, NULL) != 0) {
-        perror("pthread_mutex_init");
+    const int mutex_init_result = pthread_mutex_init(posix_mutex, NULL);
+    if (mutex_init_result != 0) {
+        fprintf(stderr, "pthread_mutex_init: %s\n", strerror(mutex_init_result));
         pthread_spin_destroy(posix_spinlock);
         exit(EXIT_FAILURE);
     }
 
     pthread_barrier_t start_barrier;
 
-    if (pthread_barrier_init(&start_barrier, NULL, (unsigned)gs_conf_thread_count + 1) != 0) {
-        perror("pthread_barrier_init");
+    const int barrier_init_result = pthread_barrier_init(&start_barrier, NULL,
+                                                         (unsigned)gs_conf_thread_count + 1);
+    if (barrier_init_result != 0) {
+        fprintf(stderr, "pthread_barrier_init: %s\n", strerror(barrier_init_result));
         pthread_mutex_destroy(posix_mutex);
         pthread_spin_destroy(posix_spinlock);
         exit(EXIT_FAILURE);

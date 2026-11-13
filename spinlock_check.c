@@ -215,8 +215,10 @@ static void run_contended_check(const char *const check_name, lock_callback acqu
     spin_init_mcs(&locks.mcs_outer_lock);
     spin_init_mcs(&locks.mcs_inner_lock);
 
-    if (pthread_barrier_init(&start_barrier, NULL, (unsigned)gs_check_thread_count) != 0) {
-        perror("pthread_barrier_init");
+    const int barrier_init_result = pthread_barrier_init(&start_barrier, NULL,
+                                                         (unsigned)gs_check_thread_count);
+    if (barrier_init_result != 0) {
+        fprintf(stderr, "pthread_barrier_init: %s\n", strerror(barrier_init_result));
         exit(EXIT_FAILURE);
     }
 
