@@ -104,7 +104,7 @@ Confirm which path was compiled in by disassembling: `casa`/`swpal` means the LS
 
 ### Source layout
 - `spinlock.h` — the three lock disciplines, header-only apart from the definitions below.
-- `spinlock.c` — the backoff window (`g_conf_spin_min` / `g_conf_spin_max`, defaults `SPINLOCK_DEFAULT_SPIN_MIN` / `SPINLOCK_DEFAULT_SPIN_MAX`) and the thread-local MCS node behind the single-argument wrappers. Link it into every program that uses the header.
+- `spinlock.c` — the backoff window (`g_conf_backoff_min_ns` / `g_conf_backoff_max_ns`, defaults `SPINLOCK_DEFAULT_BACKOFF_MIN_NS` / `SPINLOCK_DEFAULT_BACKOFF_MAX_NS`), the tick calibration (`spin_measure_ticks_per_ns_q16`, `spin_calibrate_backoff_clock`) and the thread-local MCS node behind the single-argument wrappers. Link it into every program that uses the header.
 - `spinlock_test.h` / `spinlock_test.c` / `main.c` — the benchmark harness behind the `bench_*` API.
 - `spinlock_check.c` — the correctness suite.
 
