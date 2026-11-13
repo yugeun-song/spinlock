@@ -3,7 +3,6 @@
 #include "spinlock_test.h"
 
 #include <errno.h>
-#include <getopt.h>
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
