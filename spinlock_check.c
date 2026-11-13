@@ -1,7 +1,8 @@
-#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
 
 #include <limits.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +39,8 @@ struct overlap_probe {
     char counter_padding[CACHE_LINE_SIZE - sizeof(long long)];
     size_t threads_inside_critical_section;
     size_t overlap_violation_count;
-    char probe_padding[CACHE_LINE_SIZE - (2 * sizeof(size_t))];
+    size_t misaligned_node_count;
+    char probe_padding[CACHE_LINE_SIZE - (3 * sizeof(size_t))];
 } __attribute__((aligned(CACHE_LINE_SIZE)));
 
 typedef void (*lock_callback)(struct contended_lock_pair *const mut_locks,
@@ -178,29 +180,22 @@ static void release_broken_no_op(struct contended_lock_pair *const mut_locks,
 static void *run_contended_worker(void *const mut_arg)
 {
     struct contended_worker_args *args = mut_arg;
-    struct mcs_node *node_a = aligned_alloc(CACHE_LINE_SIZE, sizeof(*node_a));
-    struct mcs_node *node_b = aligned_alloc(CACHE_LINE_SIZE, sizeof(*node_b));
+    struct mcs_node node_a = { 0 };
+    struct mcs_node node_b = { 0 };
 
-    if (node_a == NULL || node_b == NULL) {
-        perror("aligned_alloc");
-        exit(EXIT_FAILURE);
+    if (((uintptr_t)&node_a % CACHE_LINE_SIZE) != 0 || ((uintptr_t)&node_b % CACHE_LINE_SIZE) != 0) {
+        __atomic_fetch_add(&args->probe->misaligned_node_count, 1, __ATOMIC_RELAXED);
     }
-    memset(node_a, 0, sizeof(*node_a));
-    memset(node_b, 0, sizeof(*node_b));
 
     pthread_barrier_wait(args->start_barrier);
 
     for (size_t iteration = 0; iteration < args->iterations; ++iteration) {
-        args->acquire(args->locks, node_a, node_b);
+        args->acquire(args->locks, &node_a, &node_b);
         probe_enter_critical_section(args->probe);
         probe_leave_critical_section(args->probe);
-        args->release(args->locks, node_a, node_b);
+        args->release(args->locks, &node_a, &node_b);
     }
 
-    free(node_a);
-    node_a = NULL;
-    free(node_b);
-    node_b = NULL;
     return NULL;
 }
 
@@ -247,7 +242,14 @@ static void run_contended_check(const char *const check_name, lock_callback acqu
 
     long long expected_counter = (long long)gs_check_iterations_per_thread *
                                  (long long)gs_check_thread_count;
+    char detail[256];
 
+    if (probe.misaligned_node_count != 0) {
+        snprintf(detail, sizeof(detail), "%zu workers had an mcs node off a cache-line boundary",
+                 probe.misaligned_node_count);
+        report_fail(check_name, detail);
+        return;
+    }
     if (is_overlap_expected != 0) {
         if (probe.overlap_violation_count > 0) {
             report_pass(check_name);
@@ -256,9 +258,6 @@ static void run_contended_check(const char *const check_name, lock_callback acqu
         }
         return;
     }
-
-    char detail[256];
-
     if (probe.overlap_violation_count != 0) {
         snprintf(detail, sizeof(detail), "%zu overlapping critical-section entries",
                  probe.overlap_violation_count);
@@ -506,7 +505,7 @@ static void check_struct_layout(void)
         report_fail(check_name, "alignment is not CACHE_LINE_SIZE");
         return;
     }
-    if (((unsigned long)&g_spin_mcs_thread_local_node) % CACHE_LINE_SIZE != 0) {
+    if (((uintptr_t)&g_spin_mcs_thread_local_node % CACHE_LINE_SIZE) != 0) {
         report_fail(check_name, "thread-local mcs node is not cache-line aligned");
         return;
     }
@@ -661,7 +660,7 @@ int main(void)
     check_ttas_park_contended();
     run_contended_check("mcs wrapper contended, no overlapping critical sections",
                         acquire_mcs_wrapper, release_mcs_wrapper, 0);
-    run_contended_check("mcs explicit heap node contended, no overlapping critical sections",
+    run_contended_check("mcs explicit stack node contended, no overlapping critical sections",
                         acquire_mcs_explicit_node, release_mcs_explicit_node, 0);
     run_contended_check("mcs two locks nested per thread, no overlapping critical sections",
                         acquire_mcs_nested, release_mcs_nested, 0);
