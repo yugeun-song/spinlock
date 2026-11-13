@@ -57,7 +57,17 @@ set(gnu_optimized -O2)
 
 set(msvc_strict /WX)
 set(msvc_strict_link "")
-set(msvc_common /utf-8 /W4 -Wshadow /clang:-pedantic /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS)
+set(msvc_common
+    /utf-8
+    /W4
+    -Wshadow
+    /clang:-pedantic
+    /Zc:preprocessor
+    /Zc:inline
+    /we4774
+    -Werror=format-security
+    /D_CRT_SECURE_NO_WARNINGS
+)
 set(msvc_debug
     /Od
     /Ob0
@@ -69,14 +79,25 @@ set(msvc_debug
     /clang:-ffp-contract=off
     -fno-eliminate-unused-debug-types
     /clang:-fkeep-persistent-storage-variables
+    /guard:ehcont
+    /we4146
+    /we4308
+    /we4532
+    /we4533
+    /we4700
+    /we4703
+    /we4789
+    /we4995
+    /we4996
 )
-set(msvc_debug_link /DEBUG /INCREMENTAL:NO /DYNAMICBASE:NO)
+set(msvc_debug_link /DEBUG /INCREMENTAL:NO /DYNAMICBASE:NO /guard:ehcont)
 set(msvc_release
     /O2
     /Zi
     /sdl
     /GS
     /guard:cf
+    /guard:ehcont
     /clang:-fno-omit-frame-pointer
 )
 set(msvc_release_link
@@ -85,6 +106,7 @@ set(msvc_release_link
     /OPT:REF
     /OPT:ICF
     /guard:cf
+    /guard:ehcont
     /CETCOMPAT
     /DYNAMICBASE
     /HIGHENTROPYVA
