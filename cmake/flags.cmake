@@ -59,11 +59,39 @@ set(gnu_optimized -O2)
 
 set(msvc_strict /WX)
 set(msvc_strict_link "")
-set(msvc_common /utf-8 /W4 /D_CRT_SECURE_NO_WARNINGS)
-set(msvc_debug /Od /Ob0 /Zi /GS-)
-set(msvc_debug_link /DEBUG /INCREMENTAL:NO)
-set(msvc_release /O2 /Zi /sdl /GS /guard:cf)
-set(msvc_release_link /DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF /guard:cf /CETCOMPAT)
+set(msvc_common /utf-8 /W4 -Wshadow /clang:-pedantic /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS)
+set(msvc_debug
+    /Od
+    /Ob0
+    /Oi-
+    /Zi
+    /JMC-
+    /GS-
+    /clang:-fno-omit-frame-pointer
+    /clang:-ffp-contract=off
+    -fno-eliminate-unused-debug-types
+    /clang:-fkeep-persistent-storage-variables
+)
+set(msvc_debug_link /DEBUG /INCREMENTAL:NO /DYNAMICBASE:NO)
+set(msvc_release
+    /O2
+    /Zi
+    /sdl
+    /GS
+    /guard:cf
+    /clang:-fno-omit-frame-pointer
+)
+set(msvc_release_link
+    /DEBUG
+    /INCREMENTAL:NO
+    /OPT:REF
+    /OPT:ICF
+    /guard:cf
+    /CETCOMPAT
+    /DYNAMICBASE
+    /HIGHENTROPYVA
+    /NXCOMPAT
+)
 set(msvc_optimized /O2)
 set(msvc_gprof "")
 
@@ -75,7 +103,7 @@ if(SANITIZE STREQUAL "")
 endif()
 set(gnu_sanitize ${gnu_debug} -fsanitize=${SANITIZE} -fno-sanitize-recover=all)
 set(gnu_sanitize_link ${gnu_debug_link} -fsanitize=${SANITIZE})
-set(msvc_sanitize ${msvc_debug} /fsanitize=${SANITIZE})
+set(msvc_sanitize ${msvc_debug} /fsanitize=${SANITIZE} -fno-sanitize-recover=all)
 set(msvc_sanitize_link ${msvc_debug_link})
 
 function(probe_flags out config)
@@ -84,6 +112,7 @@ function(probe_flags out config)
     set(try_config ${config})
     if(NOT config MATCHES "^(Debug|Release)$")
         set(try_config Debug)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
     endif()
     string(TOUPPER ${try_config} config_upper)
     set(CMAKE_TRY_COMPILE_CONFIGURATION ${try_config})
