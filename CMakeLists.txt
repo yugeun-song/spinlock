@@ -33,7 +33,7 @@ report("programs" "bin/${TARGET_NAME}-<mode>/")
 
 add_compile_options(-Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith -Wcast-qual
                     -Wwrite-strings -Wvla -Wundef -Wnull-dereference -Wimplicit-fallthrough
-                    -Wdouble-promotion -Wconversion -Wsign-conversion)
+                    -Wdouble-promotion -Wconversion -Wsign-conversion -Wno-unused-parameter)
 add_compile_definitions($<$<CONFIG:Debug,Sanitize>:SPINLOCK_DEBUG>)
 add_compile_options($<$<CONFIG:Sanitize>:-ftls-model=local-exec>)
 if(TARGET_ARCH STREQUAL "aarch64")
