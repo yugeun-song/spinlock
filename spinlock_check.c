@@ -36,9 +36,9 @@ struct contended_lock_pair {
 struct overlap_probe {
     long long protected_counter;
     char counter_padding[CACHE_LINE_SIZE - sizeof(long long)];
-    int threads_inside_critical_section;
-    int overlap_violation_count;
-    char probe_padding[CACHE_LINE_SIZE - (2 * sizeof(int))];
+    size_t threads_inside_critical_section;
+    size_t overlap_violation_count;
+    char probe_padding[CACHE_LINE_SIZE - (2 * sizeof(size_t))];
 } __attribute__((aligned(CACHE_LINE_SIZE)));
 
 typedef void (*lock_callback)(struct contended_lock_pair *const mut_locks,
@@ -48,7 +48,7 @@ struct contended_worker_args {
     struct contended_lock_pair *locks;
     struct overlap_probe *probe;
     pthread_barrier_t *start_barrier;
-    int iterations;
+    size_t iterations;
     lock_callback acquire;
     lock_callback release;
 };
@@ -61,10 +61,10 @@ enum misuse_kind {
 };
 #endif
 
-static int gs_failed_check_count = 0;
-static int gs_passed_check_count = 0;
-static int gs_check_thread_count = CHECK_MAX_THREAD_COUNT;
-static int gs_check_iterations_per_thread = CHECK_ITERATIONS_PER_THREAD;
+static size_t gs_failed_check_count = 0;
+static size_t gs_passed_check_count = 0;
+static size_t gs_check_thread_count = CHECK_MAX_THREAD_COUNT;
+static size_t gs_check_iterations_per_thread = CHECK_ITERATIONS_PER_THREAD;
 
 static void report_pass(const char *const check_name)
 {
@@ -85,8 +85,8 @@ static void report_skip(const char *const check_name, const char *const reason)
 
 static void probe_enter_critical_section(struct overlap_probe *const mut_probe)
 {
-    const int previously_inside = __atomic_fetch_add(&mut_probe->threads_inside_critical_section, 1,
-                                                     __ATOMIC_ACQ_REL);
+    const size_t previously_inside = __atomic_fetch_add(&mut_probe->threads_inside_critical_section,
+                                                        1, __ATOMIC_ACQ_REL);
     if (previously_inside != 0) {
         __atomic_fetch_add(&mut_probe->overlap_violation_count, 1, __ATOMIC_RELAXED);
     }
@@ -95,7 +95,7 @@ static void probe_enter_critical_section(struct overlap_probe *const mut_probe)
 
 static void probe_leave_critical_section(struct overlap_probe *const mut_probe)
 {
-    for (int pause_index = 0; pause_index < CHECK_HOLD_PAUSE_COUNT; ++pause_index) {
+    for (size_t pause_index = 0; pause_index < CHECK_HOLD_PAUSE_COUNT; ++pause_index) {
         cpu_relax();
     }
     __atomic_fetch_sub(&mut_probe->threads_inside_critical_section, 1, __ATOMIC_ACQ_REL);
@@ -190,7 +190,7 @@ static void *run_contended_worker(void *const mut_arg)
 
     pthread_barrier_wait(args->start_barrier);
 
-    for (int iteration = 0; iteration < args->iterations; ++iteration) {
+    for (size_t iteration = 0; iteration < args->iterations; ++iteration) {
         args->acquire(args->locks, node_a, node_b);
         probe_enter_critical_section(args->probe);
         probe_leave_critical_section(args->probe);
@@ -216,7 +216,7 @@ static void run_contended_check(const char *const check_name, lock_callback acqu
     spin_init_mcs(&locks.mcs_inner_lock);
 
     const int barrier_init_result = pthread_barrier_init(&start_barrier, NULL,
-                                                         (unsigned)gs_check_thread_count);
+                                                         (unsigned int)gs_check_thread_count);
     if (barrier_init_result != 0) {
         fprintf(stderr, "pthread_barrier_init: %s\n", strerror(barrier_init_result));
         exit(EXIT_FAILURE);
@@ -232,7 +232,7 @@ static void run_contended_check(const char *const check_name, lock_callback acqu
     };
     pthread_t worker_threads[CHECK_MAX_THREAD_COUNT];
 
-    for (int worker_index = 0; worker_index < gs_check_thread_count; ++worker_index) {
+    for (size_t worker_index = 0; worker_index < gs_check_thread_count; ++worker_index) {
         const int create_result = pthread_create(&worker_threads[worker_index], NULL,
                                                  run_contended_worker, &worker_args);
         if (create_result != 0) {
@@ -240,12 +240,13 @@ static void run_contended_check(const char *const check_name, lock_callback acqu
             exit(EXIT_FAILURE);
         }
     }
-    for (int worker_index = 0; worker_index < gs_check_thread_count; ++worker_index) {
+    for (size_t worker_index = 0; worker_index < gs_check_thread_count; ++worker_index) {
         pthread_join(worker_threads[worker_index], NULL);
     }
     pthread_barrier_destroy(&start_barrier);
 
-    long long expected_counter = (long long)gs_check_iterations_per_thread * gs_check_thread_count;
+    long long expected_counter = (long long)gs_check_iterations_per_thread *
+                                 (long long)gs_check_thread_count;
 
     if (is_overlap_expected != 0) {
         if (probe.overlap_violation_count > 0) {
@@ -259,7 +260,7 @@ static void run_contended_check(const char *const check_name, lock_callback acqu
     char detail[256];
 
     if (probe.overlap_violation_count != 0) {
-        snprintf(detail, sizeof(detail), "%d overlapping critical-section entries",
+        snprintf(detail, sizeof(detail), "%zu overlapping critical-section entries",
                  probe.overlap_violation_count);
         report_fail(check_name, detail);
         return;
@@ -291,7 +292,7 @@ static void check_ttas_uncontended_state_transitions(void)
         report_fail(check_name, "spin_init_ttas did not clear is_locked");
         return;
     }
-    for (int repeat = 0; repeat < 3; ++repeat) {
+    for (size_t repeat = 0; repeat < 3; ++repeat) {
         spin_lock_ttas(&lock);
         if (lock.is_locked != SPINLOCK_LOCKED) {
             report_fail(check_name, "is_locked not set after spin_lock_ttas");
@@ -350,7 +351,7 @@ static void check_mcs_uncontended_state_transitions(void)
         report_fail(check_name, "spin_init_mcs left queue_tail non-NULL");
         return;
     }
-    for (int repeat = 0; repeat < 3; ++repeat) {
+    for (size_t repeat = 0; repeat < 3; ++repeat) {
         spin_lock_mcs_node(&lock, &explicit_node);
         if (lock.queue_tail != &explicit_node) {
             report_fail(check_name, "queue_tail is not the holder's node while held");
@@ -428,7 +429,7 @@ static void check_mcs_wrapper_node_is_per_thread(void)
         return;
     }
 
-    int wait_spins = 0;
+    size_t wait_spins = 0;
 
     while (mcs_load_acquire_node(&g_spin_mcs_thread_local_node.next_waiter) == NULL) {
         cpu_relax();
@@ -620,7 +621,7 @@ static void choose_iterations_per_thread(void)
                 INT_MAX, override_text);
         exit(EXIT_FAILURE);
     }
-    gs_check_iterations_per_thread = (int)override_value;
+    gs_check_iterations_per_thread = (size_t)override_value;
 }
 
 static void choose_thread_count(void)
@@ -630,7 +631,7 @@ static void choose_thread_count(void)
     if (online_cpus >= CHECK_MAX_THREAD_COUNT) {
         gs_check_thread_count = CHECK_MAX_THREAD_COUNT;
     } else if (online_cpus >= CHECK_MIN_THREAD_COUNT) {
-        gs_check_thread_count = (int)online_cpus;
+        gs_check_thread_count = (size_t)online_cpus;
     } else {
         gs_check_thread_count = CHECK_MIN_THREAD_COUNT;
     }
@@ -642,7 +643,7 @@ int main(void)
     choose_thread_count();
     choose_iterations_per_thread();
 
-    printf("spinlock_check: %d worker threads, %d iterations each, SPINLOCK_DEBUG %s\n",
+    printf("spinlock_check: %zu worker threads, %zu iterations each, SPINLOCK_DEBUG %s\n",
            gs_check_thread_count, gs_check_iterations_per_thread, DEBUG_STATE_TEXT);
 
     check_struct_layout();
@@ -667,7 +668,7 @@ int main(void)
 
     check_debug_misuse_detection();
 
-    printf("spinlock_check: %d passed, %d failed\n", gs_passed_check_count, gs_failed_check_count);
+    printf("spinlock_check: %zu passed, %zu failed\n", gs_passed_check_count, gs_failed_check_count);
     if (gs_failed_check_count != 0) {
         return EXIT_FAILURE;
     }

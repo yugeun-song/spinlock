@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,7 +27,7 @@
 #define CONTENDER_KEY_LIST "ttas,ttas_park,pspin,pmutex,mcs"
 #define MEASUREMENT_CSV_HEADER "lock,run_position,threads,iterations,workload_nops,nop_ns,timer_slack_ns,elapsed_ms,shared_count,expected_count,count_ok,earliest_done_ms,voluntary_switches,involuntary_switches,placement_page,outside_nops,backoff_min_ns,backoff_max_ns"
 #define CACHE_LINE_PAIR_SIZE (2 * CACHE_LINE_SIZE)
-#define NOP_LOOPS_UNSET (-1)
+#define NOP_LOOPS_UNSET SIZE_MAX
 #define OPTION_STRING "+t:i:l:o:m:M:C:K:S:F:P:"
 
 /*
@@ -85,7 +86,7 @@ struct contender {
 };
 
 struct nop_calibration {
-    int loop_count;
+    size_t loop_count;
     double nanoseconds_per_loop;
 };
 
@@ -103,10 +104,10 @@ enum output_format {
     OUTPUT_FORMAT_CSV,
 };
 
-static int gs_conf_iterations = DEFAULT_ITERATIONS;
-static int gs_conf_workload_nop_loops = NOP_LOOPS_UNSET;
-static int gs_conf_outside_nop_loops = NOP_LOOPS_UNSET;
-static int gs_conf_thread_count = DEFAULT_THREAD_COUNT;
+static size_t gs_conf_iterations = DEFAULT_ITERATIONS;
+static size_t gs_conf_workload_nop_loops = NOP_LOOPS_UNSET;
+static size_t gs_conf_outside_nop_loops = NOP_LOOPS_UNSET;
+static size_t gs_conf_thread_count = DEFAULT_THREAD_COUNT;
 static int gs_conf_timerslack_ns = -1;
 
 static long gs_detected_cache_line_size = 0;
@@ -121,7 +122,7 @@ static enum bench_lock gs_contender_run_order[BENCH_LOCK_COUNT] = {
     BENCH_LOCK_POSIX_MUTEX,
     BENCH_LOCK_MCS,
 };
-static int gs_contender_run_count = BENCH_LOCK_COUNT;
+static size_t gs_contender_run_count = BENCH_LOCK_COUNT;
 
 /*
  * Optional CPU pin set parsed from -C (e.g. "0-3" or "0,2,4"). When set, worker
@@ -131,13 +132,13 @@ static int gs_contender_run_count = BENCH_LOCK_COUNT;
  * the scheduler scatters workers across fast and slow cores run to run, and the
  * numbers swing.
  */
-static int *gs_conf_pinned_cpu_ids = NULL;
-static int gs_conf_pinned_cpu_count = 0;
+static size_t *gs_conf_pinned_cpu_ids = NULL;
+static size_t gs_conf_pinned_cpu_count = 0;
 static int gs_is_pinning_requested = 0;
 static const char *gs_pinning_note = "";
 
-static int *gs_conf_placement_pages = NULL;
-static int gs_conf_placement_run_count = 0;
+static size_t *gs_conf_placement_pages = NULL;
+static size_t gs_conf_placement_run_count = 0;
 static unsigned char *gs_placement_pool = NULL;
 static size_t gs_placement_page_stride = 0;
 static size_t gs_placement_pool_size = 0;
@@ -201,9 +202,9 @@ static double compute_elapsed_ms(const struct timespec *const begin_nullable,
     return (double)elapsed_nanoseconds / 1000000.0;
 }
 
-static inline void run_dummy_workload(int nop_loop_count)
+static inline void run_dummy_workload(size_t nop_loop_count)
 {
-    for (int nop_index = 0; nop_index < nop_loop_count; ++nop_index) {
+    for (size_t nop_index = 0; nop_index < nop_loop_count; ++nop_index) {
         __asm__ volatile("nop" : : : "memory");
     }
 }
@@ -227,9 +228,9 @@ static void *run_ttas_worker(void *const mut_arg_nullable)
         return NULL;
     }
 
-    const int iterations = gs_conf_iterations;
-    const int nop_loops = gs_conf_workload_nop_loops;
-    const int outside_loops = gs_conf_outside_nop_loops;
+    const size_t iterations = gs_conf_iterations;
+    const size_t nop_loops = gs_conf_workload_nop_loops;
+    const size_t outside_loops = gs_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     struct spinlock_ttas *const lock = context->ttas_lock;
 
@@ -237,7 +238,7 @@ static void *run_ttas_worker(void *const mut_arg_nullable)
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
     if (outside_loops > 0) {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             spin_lock_ttas(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -245,7 +246,7 @@ static void *run_ttas_worker(void *const mut_arg_nullable)
             run_dummy_workload(outside_loops);
         }
     } else {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             spin_lock_ttas(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -265,9 +266,9 @@ static void *run_ttas_park_worker(void *const mut_arg_nullable)
         return NULL;
     }
 
-    const int iterations = gs_conf_iterations;
-    const int nop_loops = gs_conf_workload_nop_loops;
-    const int outside_loops = gs_conf_outside_nop_loops;
+    const size_t iterations = gs_conf_iterations;
+    const size_t nop_loops = gs_conf_workload_nop_loops;
+    const size_t outside_loops = gs_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     struct spinlock_ttas *const lock = context->ttas_lock;
 
@@ -275,7 +276,7 @@ static void *run_ttas_park_worker(void *const mut_arg_nullable)
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
     if (outside_loops > 0) {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             spin_lock_ttas_park(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -283,7 +284,7 @@ static void *run_ttas_park_worker(void *const mut_arg_nullable)
             run_dummy_workload(outside_loops);
         }
     } else {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             spin_lock_ttas_park(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -303,9 +304,9 @@ static void *run_mcs_worker(void *const mut_arg_nullable)
         return NULL;
     }
 
-    const int iterations = gs_conf_iterations;
-    const int nop_loops = gs_conf_workload_nop_loops;
-    const int outside_loops = gs_conf_outside_nop_loops;
+    const size_t iterations = gs_conf_iterations;
+    const size_t nop_loops = gs_conf_workload_nop_loops;
+    const size_t outside_loops = gs_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     struct spinlock_mcs *const lock = context->mcs_lock;
 
@@ -313,7 +314,7 @@ static void *run_mcs_worker(void *const mut_arg_nullable)
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
     if (outside_loops > 0) {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             spin_lock_mcs(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -321,7 +322,7 @@ static void *run_mcs_worker(void *const mut_arg_nullable)
             run_dummy_workload(outside_loops);
         }
     } else {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             spin_lock_mcs(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -341,9 +342,9 @@ static void *run_posix_spinlock_worker(void *const mut_arg_nullable)
         return NULL;
     }
 
-    const int iterations = gs_conf_iterations;
-    const int nop_loops = gs_conf_workload_nop_loops;
-    const int outside_loops = gs_conf_outside_nop_loops;
+    const size_t iterations = gs_conf_iterations;
+    const size_t nop_loops = gs_conf_workload_nop_loops;
+    const size_t outside_loops = gs_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     pthread_spinlock_t *const lock = context->posix_spinlock;
 
@@ -351,7 +352,7 @@ static void *run_posix_spinlock_worker(void *const mut_arg_nullable)
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
     if (outside_loops > 0) {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             pthread_spin_lock(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -359,7 +360,7 @@ static void *run_posix_spinlock_worker(void *const mut_arg_nullable)
             run_dummy_workload(outside_loops);
         }
     } else {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             pthread_spin_lock(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -379,9 +380,9 @@ static void *run_posix_mutex_worker(void *const mut_arg_nullable)
         return NULL;
     }
 
-    const int iterations = gs_conf_iterations;
-    const int nop_loops = gs_conf_workload_nop_loops;
-    const int outside_loops = gs_conf_outside_nop_loops;
+    const size_t iterations = gs_conf_iterations;
+    const size_t nop_loops = gs_conf_workload_nop_loops;
+    const size_t outside_loops = gs_conf_outside_nop_loops;
     long long *const shared_counter = context->shared_counter;
     pthread_mutex_t *const lock = context->posix_mutex;
 
@@ -389,7 +390,7 @@ static void *run_posix_mutex_worker(void *const mut_arg_nullable)
     clock_gettime(CLOCK_MONOTONIC, &context->loop_begin_time);
 
     if (outside_loops > 0) {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             pthread_mutex_lock(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -397,7 +398,7 @@ static void *run_posix_mutex_worker(void *const mut_arg_nullable)
             run_dummy_workload(outside_loops);
         }
     } else {
-        for (int iteration = 0; iteration < iterations; ++iteration) {
+        for (size_t iteration = 0; iteration < iterations; ++iteration) {
             pthread_mutex_lock(lock);
             *shared_counter += 1;
             run_dummy_workload(nop_loops);
@@ -423,7 +424,7 @@ static void *run_nop_calibration(void *const mut_arg)
 
     double best_pass_ms = 1.0e300;
 
-    for (int pass_index = 0; pass_index < NOP_CALIBRATION_PASSES; ++pass_index) {
+    for (size_t pass_index = 0; pass_index < NOP_CALIBRATION_PASSES; ++pass_index) {
         struct timespec pass_begin_time;
 
         clock_gettime(CLOCK_MONOTONIC, &pass_begin_time);
@@ -435,13 +436,13 @@ static void *run_nop_calibration(void *const mut_arg)
         }
     }
 
-    calibration->nanoseconds_per_loop = best_pass_ms * 1.0e6 / calibration->loop_count;
+    calibration->nanoseconds_per_loop = best_pass_ms * 1.0e6 / (double)calibration->loop_count;
     return NULL;
 }
 
 static void parse_contender_list(const char *const argument_text)
 {
-    for (int contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
+    for (size_t contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
         gs_contenders[contender_index].is_selected = 0;
     }
     gs_contender_run_count = 0;
@@ -450,7 +451,7 @@ static void parse_contender_list(const char *const argument_text)
 
     while (*cursor != '\0') {
         const size_t token_length = strcspn(cursor, ",");
-        int contender_index;
+        size_t contender_index;
 
         for (contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
             const char *cli_key = gs_contenders[contender_index].cli_key;
@@ -499,8 +500,8 @@ static long get_configured_cpu_id_limit(void)
  * array and return its length. Rejects malformed input the same way the numeric
  * options do, so a typo fails loudly. A repeated option replaces the earlier list.
  */
-static int parse_index_list(int **const mut_indexes, const char *const argument_text,
-                            long index_limit, const char *const list_name)
+static size_t parse_index_list(size_t **const mut_indexes, const char *const argument_text,
+                               long index_limit, const char *const list_name)
 {
     size_t indexes_capacity = 8;
 
@@ -512,7 +513,7 @@ static int parse_index_list(int **const mut_indexes, const char *const argument_
     }
 
     const char *cursor = argument_text;
-    int index_count = 0;
+    size_t index_count = 0;
 
     while (*cursor != '\0') {
         char *parse_end = NULL;
@@ -543,18 +544,18 @@ static int parse_index_list(int **const mut_indexes, const char *const argument_
             exit(EXIT_FAILURE);
         }
         for (long range_index = range_first_index; range_index <= range_last_index; ++range_index) {
-            if ((size_t)index_count == indexes_capacity) {
+            if (index_count == indexes_capacity) {
                 indexes_capacity *= 2;
 
-                int *grown_indexes = realloc(*mut_indexes,
-                                             indexes_capacity * sizeof(**mut_indexes));
+                size_t *grown_indexes = realloc(*mut_indexes,
+                                                indexes_capacity * sizeof(**mut_indexes));
                 if (grown_indexes == NULL) {
                     perror("realloc");
                     exit(EXIT_FAILURE);
                 }
                 *mut_indexes = grown_indexes;
             }
-            (*mut_indexes)[index_count] = (int)range_index;
+            (*mut_indexes)[index_count] = (size_t)range_index;
             ++index_count;
         }
         if (*cursor == ',') {
@@ -618,7 +619,7 @@ static void select_fastest_core_class(void)
     }
 
     long highest_capacity = 0;
-    int allowed_count = 0;
+    size_t allowed_count = 0;
     size_t attribute_index;
 
     for (attribute_index = 0; attribute_index < attribute_count; ++attribute_index) {
@@ -646,7 +647,7 @@ static void select_fastest_core_class(void)
         return;
     }
 
-    int fast_count = 0;
+    size_t fast_count = 0;
 
     for (size_t cpu_index = 0; cpu_index < CPU_SETSIZE; ++cpu_index) {
         if (CPU_ISSET(cpu_index, &allowed_cpus) != 0 &&
@@ -659,17 +660,17 @@ static void select_fastest_core_class(void)
         return;
     }
 
-    gs_conf_pinned_cpu_ids = malloc((size_t)fast_count * sizeof(*gs_conf_pinned_cpu_ids));
+    gs_conf_pinned_cpu_ids = malloc(fast_count * sizeof(*gs_conf_pinned_cpu_ids));
     if (gs_conf_pinned_cpu_ids == NULL) {
         perror("malloc");
         exit(EXIT_FAILURE);
     }
-    for (int sibling_pass = 0; sibling_pass < 2; ++sibling_pass) {
+    for (size_t sibling_pass = 0; sibling_pass < 2; ++sibling_pass) {
         for (size_t cpu_index = 0; cpu_index < CPU_SETSIZE; ++cpu_index) {
             if (CPU_ISSET(cpu_index, &allowed_cpus) != 0 &&
                 cpu_capacities[cpu_index] * 100 >= highest_capacity * FAST_CORE_CAPACITY_PERCENT &&
                 is_first_thread_of_core(cpu_index) == (sibling_pass == 0)) {
-                gs_conf_pinned_cpu_ids[gs_conf_pinned_cpu_count] = (int)cpu_index;
+                gs_conf_pinned_cpu_ids[gs_conf_pinned_cpu_count] = cpu_index;
                 ++gs_conf_pinned_cpu_count;
             }
         }
@@ -688,9 +689,9 @@ static void map_placement_pool(void)
         gs_conf_placement_run_count = 1;
     }
 
-    int highest_page = 0;
+    size_t highest_page = 0;
 
-    for (int run_index = 0; run_index < gs_conf_placement_run_count; ++run_index) {
+    for (size_t run_index = 0; run_index < gs_conf_placement_run_count; ++run_index) {
         if (gs_conf_placement_pages[run_index] > highest_page) {
             highest_page = gs_conf_placement_pages[run_index];
         }
@@ -699,7 +700,7 @@ static void map_placement_pool(void)
     const long page_size = sysconf(_SC_PAGESIZE);
 
     gs_placement_page_stride = (page_size > 0) ? (size_t)page_size : 4096;
-    gs_placement_pool_size = (size_t)(highest_page + 1) * gs_placement_page_stride;
+    gs_placement_pool_size = (highest_page + 1) * gs_placement_page_stride;
 
     void *pool_mapping = mmap(NULL, gs_placement_pool_size, PROT_READ | PROT_WRITE,
                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -710,10 +711,10 @@ static void map_placement_pool(void)
     gs_placement_pool = pool_mapping;
 }
 
-static struct contended_objects *get_placement_page_objects(int placement_page)
+static struct contended_objects *get_placement_page_objects(size_t placement_page)
 {
     return (struct contended_objects *)(gs_placement_pool +
-                                        ((size_t)placement_page * gs_placement_page_stride));
+                                        (placement_page * gs_placement_page_stride));
 }
 
 /*
@@ -722,13 +723,13 @@ static struct contended_objects *get_placement_page_objects(int placement_page)
  * is non-fatal: the thread still runs, just unpinned, and one warning says so.
  */
 static void pin_worker_thread_attribute(pthread_attr_t *const mut_thread_attribute,
-                                        int worker_index)
+                                        size_t worker_index)
 {
     if (gs_conf_pinned_cpu_count == 0) {
         return;
     }
 
-    size_t pinned_cpu_id = (size_t)gs_conf_pinned_cpu_ids[worker_index % gs_conf_pinned_cpu_count];
+    size_t pinned_cpu_id = gs_conf_pinned_cpu_ids[worker_index % gs_conf_pinned_cpu_count];
     cpu_set_t cpu_set;
 
     CPU_ZERO(&cpu_set);
@@ -854,7 +855,7 @@ static struct contender_measurement run_contender(struct contended_objects *cons
     pthread_barrier_t start_barrier;
 
     const int barrier_init_result = pthread_barrier_init(&start_barrier, NULL,
-                                                         (unsigned)gs_conf_thread_count + 1);
+                                                         (unsigned int)gs_conf_thread_count + 1U);
     if (barrier_init_result != 0) {
         fprintf(stderr, "pthread_barrier_init: %s\n", strerror(barrier_init_result));
         pthread_mutex_destroy(posix_mutex);
@@ -872,9 +873,8 @@ static struct contender_measurement run_contender(struct contended_objects *cons
         .voluntary_switches = 0,
         .involuntary_switches = 0
     };
-    pthread_t *worker_threads = calloc((size_t)gs_conf_thread_count, sizeof(*worker_threads));
-    struct worker_context *worker_contexts = calloc((size_t)gs_conf_thread_count,
-                                                    sizeof(*worker_contexts));
+    pthread_t *worker_threads = calloc(gs_conf_thread_count, sizeof(*worker_threads));
+    struct worker_context *worker_contexts = calloc(gs_conf_thread_count, sizeof(*worker_contexts));
     if (worker_threads == NULL || worker_contexts == NULL) {
         perror("calloc");
         pthread_barrier_destroy(&start_barrier);
@@ -883,7 +883,7 @@ static struct contender_measurement run_contender(struct contended_objects *cons
         exit(EXIT_FAILURE);
     }
 
-    for (int worker_index = 0; worker_index < gs_conf_thread_count; ++worker_index) {
+    for (size_t worker_index = 0; worker_index < gs_conf_thread_count; ++worker_index) {
         pthread_attr_t thread_attribute;
 
         worker_contexts[worker_index] = context_template;
@@ -893,7 +893,7 @@ static struct contender_measurement run_contender(struct contended_objects *cons
                                                  worker_routine, &worker_contexts[worker_index]);
         pthread_attr_destroy(&thread_attribute);
         if (create_result != 0) {
-            fprintf(stderr, "Error: pthread_create failed at index %d: %s\n", worker_index,
+            fprintf(stderr, "Error: pthread_create failed at index %zu: %s\n", worker_index,
                     strerror(create_result));
             free(worker_threads);
             worker_threads = NULL;
@@ -905,13 +905,13 @@ static struct contender_measurement run_contender(struct contended_objects *cons
 
     pthread_barrier_wait(&start_barrier);
 
-    for (int worker_index = 0; worker_index < gs_conf_thread_count; ++worker_index) {
+    for (size_t worker_index = 0; worker_index < gs_conf_thread_count; ++worker_index) {
         pthread_join(worker_threads[worker_index], NULL);
     }
 
     struct timespec earliest_begin_time = worker_contexts[0].loop_begin_time;
 
-    for (int worker_index = 1; worker_index < gs_conf_thread_count; ++worker_index) {
+    for (size_t worker_index = 1; worker_index < gs_conf_thread_count; ++worker_index) {
         if (compute_elapsed_ms(&earliest_begin_time,
                                &worker_contexts[worker_index].loop_begin_time) < 0.0) {
             earliest_begin_time = worker_contexts[worker_index].loop_begin_time;
@@ -923,7 +923,7 @@ static struct contender_measurement run_contender(struct contended_objects *cons
     long voluntary_switches = 0;
     long involuntary_switches = 0;
 
-    for (int worker_index = 0; worker_index < gs_conf_thread_count; ++worker_index) {
+    for (size_t worker_index = 0; worker_index < gs_conf_thread_count; ++worker_index) {
         const double done_ms = compute_elapsed_ms(&earliest_begin_time,
                                                   &worker_contexts[worker_index].loop_done_time);
 
@@ -937,7 +937,7 @@ static struct contender_measurement run_contender(struct contended_objects *cons
         .elapsed_ms = latest_done_ms,
         .earliest_done_ms = earliest_done_ms,
         .shared_count = mut_objects->shared_counter.value,
-        .expected_count = (long long)gs_conf_iterations * gs_conf_thread_count,
+        .expected_count = (long long)gs_conf_iterations * (long long)gs_conf_thread_count,
         .voluntary_switches = voluntary_switches,
         .involuntary_switches = involuntary_switches
     };
@@ -953,14 +953,14 @@ static struct contender_measurement run_contender(struct contended_objects *cons
     return measurement;
 }
 
-static void print_contender_measurement(enum bench_lock lock_id, int run_position,
-                                        int placement_page,
+static void print_contender_measurement(enum bench_lock lock_id, size_t run_position,
+                                        size_t placement_page,
                                         const struct contender_measurement *const measurement)
 {
     const int is_count_matched = measurement->shared_count == measurement->expected_count;
 
     if (gs_conf_output_format == OUTPUT_FORMAT_CSV) {
-        printf("%s,%d,%d,%d,%d,%.4f,%d,%.6f,%lld,%lld,%d,%.6f,%ld,%ld,%d,%d,%d,%d\n",
+        printf("%s,%zu,%zu,%zu,%zu,%.4f,%d,%.6f,%lld,%lld,%d,%.6f,%ld,%ld,%zu,%zu,%d,%d\n",
                gs_contenders[lock_id].cli_key, run_position, gs_conf_thread_count,
                gs_conf_iterations, gs_conf_workload_nop_loops, gs_measured_nop_ns,
                prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), measurement->elapsed_ms,
@@ -981,7 +981,7 @@ static void print_contender_measurement(enum bench_lock lock_id, int run_positio
            "  - Atomic Count : %10lld / %lld (%s)\n"
            "  - Fairness     : min %10.3f ms, max %10.3f ms, min/max %.2f\n"
            "  - Switches     : %ld involuntary, %ld voluntary\n"
-           "  - Placement    : page %d\n",
+           "  - Placement    : page %zu\n",
            gs_contenders[lock_id].display_name, measurement->elapsed_ms, measurement->shared_count,
            measurement->expected_count, (is_count_matched != 0) ? "OK" : "FAIL",
            measurement->earliest_done_ms, measurement->elapsed_ms,
@@ -996,19 +996,20 @@ static void print_contender_measurement(enum bench_lock lock_id, int run_positio
  */
 static void run_warmup_pass(void *(*worker_routine)(void *const mut_arg))
 {
-    const int configured_iterations = gs_conf_iterations;
-    const int warmup_iterations = configured_iterations / 10;
+    const size_t configured_iterations = gs_conf_iterations;
+    const size_t warmup_iterations = configured_iterations / 10;
 
     gs_conf_iterations = (warmup_iterations > 0) ? warmup_iterations : 1;
     run_contender(get_placement_page_objects(gs_conf_placement_pages[0]), worker_routine, 0);
     gs_conf_iterations = configured_iterations;
 }
 
-static int convert_ns_to_nop_loops(int target_ns)
+static size_t convert_ns_to_nop_loops(int target_ns)
 {
     const double loop_count = (gs_measured_nop_ns > 0.0) ? target_ns / gs_measured_nop_ns : 0.0;
 
-    return (loop_count < (double)INT_MAX) ? (int)(loop_count + 0.5) : INT_MAX;
+    return (loop_count < (double)MAX_WORKLOAD_NOP_LOOPS) ? (size_t)(loop_count + 0.5)
+                                                         : MAX_WORKLOAD_NOP_LOOPS;
 }
 
 void bench_detect_topology(void)
@@ -1047,8 +1048,8 @@ void bench_parse_args(int argc, char *const *const argv)
          option_char = getopt(argc, argv, OPTION_STRING)) {
         switch (option_char) {
         case 't':
-            gs_conf_thread_count = parse_bounded_int(optarg, MIN_THREAD_COUNT, MAX_THREAD_COUNT,
-                                                     "threads");
+            gs_conf_thread_count = (size_t)parse_bounded_int(optarg, MIN_THREAD_COUNT,
+                                                             MAX_THREAD_COUNT, "threads");
             break;
         case 'C':
             gs_is_pinning_requested = 1;
@@ -1071,16 +1072,18 @@ void bench_parse_args(int argc, char *const *const argv)
             parse_contender_list(optarg);
             break;
         case 'i':
-            gs_conf_iterations = parse_bounded_int(optarg, MIN_ITERATIONS, MAX_ITERATIONS,
-                                                   "iterations");
+            gs_conf_iterations = (size_t)parse_bounded_int(optarg, MIN_ITERATIONS, MAX_ITERATIONS,
+                                                           "iterations");
             break;
         case 'l':
-            gs_conf_workload_nop_loops = parse_bounded_int(optarg, MIN_WORKLOAD_NOP_LOOPS,
-                                                           MAX_WORKLOAD_NOP_LOOPS, "load_loops");
+            gs_conf_workload_nop_loops = (size_t)parse_bounded_int(optarg, MIN_WORKLOAD_NOP_LOOPS,
+                                                                   MAX_WORKLOAD_NOP_LOOPS,
+                                                                   "load_loops");
             break;
         case 'o':
-            gs_conf_outside_nop_loops = parse_bounded_int(optarg, MIN_WORKLOAD_NOP_LOOPS,
-                                                          MAX_WORKLOAD_NOP_LOOPS, "outside_loops");
+            gs_conf_outside_nop_loops = (size_t)parse_bounded_int(optarg, MIN_WORKLOAD_NOP_LOOPS,
+                                                                  MAX_WORKLOAD_NOP_LOOPS,
+                                                                  "outside_loops");
             break;
         case 'm':
             g_conf_backoff_min_ns = parse_bounded_int(optarg, MIN_BACKOFF_NS, MAX_BACKOFF_NS,
@@ -1199,12 +1202,12 @@ void bench_print_config(void)
     if (gs_conf_pinned_cpu_count > 0) {
         int written_length = snprintf(pinning_description, sizeof(pinning_description), "cpus");
 
-        for (int cpu_index = 0;
+        for (size_t cpu_index = 0;
              cpu_index < gs_conf_pinned_cpu_count &&
              written_length < (int)sizeof(pinning_description) - 40;
              ++cpu_index) {
             written_length += snprintf(pinning_description + written_length,
-                                       sizeof(pinning_description) - (size_t)written_length, " %d",
+                                       sizeof(pinning_description) - (size_t)written_length, " %zu",
                                        gs_conf_pinned_cpu_ids[cpu_index]);
         }
         snprintf(pinning_description + written_length,
@@ -1219,10 +1222,10 @@ void bench_print_config(void)
            "  Timer Slack    : %d ns\n"
            "  NOP Cost       : %.4f ns\n"
            "Configuration:\n"
-           "  Threads        : %d\n"
-           "  Iterations     : %d\n"
-           "  Inside Lock    : %d NOPs (%.1f ns)\n"
-           "  Outside Lock   : %d NOPs (%.1f ns)\n"
+           "  Threads        : %zu\n"
+           "  Iterations     : %zu\n"
+           "  Inside Lock    : %zu NOPs (%.1f ns)\n"
+           "  Outside Lock   : %zu NOPs (%.1f ns)\n"
            "  Backoff Range  : %d ~ %d ns\n"
            "  Settle Delay   : %d ms (between tests)\n"
            "  Memory Lock    : %s\n"
@@ -1230,14 +1233,14 @@ void bench_print_config(void)
            "--------------------------------------\n\n",
            gs_detected_cache_line_size, prctl(PR_GET_TIMERSLACK, 0, 0, 0, 0), gs_measured_nop_ns,
            gs_conf_thread_count, gs_conf_iterations, gs_conf_workload_nop_loops,
-           gs_conf_workload_nop_loops * gs_measured_nop_ns, gs_conf_outside_nop_loops,
-           gs_conf_outside_nop_loops * gs_measured_nop_ns, g_conf_backoff_min_ns,
+           (double)gs_conf_workload_nop_loops * gs_measured_nop_ns, gs_conf_outside_nop_loops,
+           (double)gs_conf_outside_nop_loops * gs_measured_nop_ns, g_conf_backoff_min_ns,
            g_conf_backoff_max_ns, SETTLE_DELAY_MS, gs_memory_lock_status, pinning_description);
 }
 
 void bench_warm_up_all(void)
 {
-    for (int run_position = 0; run_position < gs_contender_run_count; ++run_position) {
+    for (size_t run_position = 0; run_position < gs_contender_run_count; ++run_position) {
         run_warmup_pass(gs_contenders[gs_contender_run_order[run_position]].worker_routine);
     }
 }
@@ -1249,14 +1252,14 @@ void bench_run_all(struct bench_results *const mut_results_nullable)
     }
 
     mut_results_nullable->failed_atomic_count_checks = 0;
-    for (int contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
+    for (size_t contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
         mut_results_nullable->elapsed_ms[contender_index] = -1.0;
     }
 
-    for (int placement_run = 0; placement_run < gs_conf_placement_run_count; ++placement_run) {
-        const int placement_page = gs_conf_placement_pages[placement_run];
+    for (size_t placement_run = 0; placement_run < gs_conf_placement_run_count; ++placement_run) {
+        const size_t placement_page = gs_conf_placement_pages[placement_run];
 
-        for (int run_position = 0; run_position < gs_contender_run_count; ++run_position) {
+        for (size_t run_position = 0; run_position < gs_contender_run_count; ++run_position) {
             const enum bench_lock lock_id = gs_contender_run_order[run_position];
 
             if ((placement_run > 0 || run_position > 0) &&
@@ -1279,7 +1282,7 @@ void bench_run_all(struct bench_results *const mut_results_nullable)
 
 void bench_print_summary(const struct bench_results *const results_nullable)
 {
-    static const int s_summary_order[BENCH_LOCK_COUNT] = {
+    static const enum bench_lock s_summary_order[BENCH_LOCK_COUNT] = {
         BENCH_LOCK_TTAS,
         BENCH_LOCK_TTAS_PARK,
         BENCH_LOCK_MCS,
@@ -1295,7 +1298,7 @@ void bench_print_summary(const struct bench_results *const results_nullable)
     const char *winner_name = NULL;
     double best_ms = 1.0e300;
 
-    for (int contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
+    for (size_t contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
         if (gs_contenders[contender_index].is_selected != 0 &&
             results_nullable->elapsed_ms[contender_index] < best_ms) {
             best_ms = results_nullable->elapsed_ms[contender_index];
@@ -1305,12 +1308,12 @@ void bench_print_summary(const struct bench_results *const results_nullable)
 
     printf("\n--------------------------------------\n"
            "FINAL RESULT:\n");
-    for (int order_index = 0; order_index < BENCH_LOCK_COUNT; ++order_index) {
-        const int contender_index = s_summary_order[order_index];
+    for (size_t order_index = 0; order_index < BENCH_LOCK_COUNT; ++order_index) {
+        const enum bench_lock lock_id = s_summary_order[order_index];
 
-        if (gs_contenders[contender_index].is_selected != 0) {
-            printf("  %-14s : %10.3f ms\n", gs_contenders[contender_index].summary_label,
-                   results_nullable->elapsed_ms[contender_index]);
+        if (gs_contenders[lock_id].is_selected != 0) {
+            printf("  %-14s : %10.3f ms\n", gs_contenders[lock_id].summary_label,
+                   results_nullable->elapsed_ms[lock_id]);
         }
     }
     if (gs_contenders[BENCH_LOCK_TTAS].is_selected != 0 &&
