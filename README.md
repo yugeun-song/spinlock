@@ -113,7 +113,7 @@ Confirm which path was compiled in by disassembling: `casa`/`swpal` means the LS
 Run the binary directly from the command line. If no arguments are provided, default values are used. The examples use the release build of the default toolchain on x86-64; substitute your own `<arch>-linux-<compiler>` folder.
 
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test [options]
+./bin/x86_64-linux-gcc-release/spinlock_test [options]
 ```
 
 ### Command-Line Arguments
@@ -140,76 +140,76 @@ The header prints the measured cost of one workload loop iteration (`NOP Cost`, 
 #### 1. Default Run
 4 threads, 50 ns inside the lock and 150 ns outside it: heavy but not saturated contention. On P/E or big.LITTLE parts the workers run on the fastest core class.
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test
+./bin/x86_64-linux-gcc-release/spinlock_test
 ```
 
 #### 2. High Contention Test
 Saturate the lock: 8 threads, an empty critical section and no work outside the lock.
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test -t 8 -l 0 -o 0
+./bin/x86_64-linux-gcc-release/spinlock_test -t 8 -l 0 -o 0
 ```
 
 #### 3. Long Critical Section Test
 Simulate a scenario where the lock is held for a longer duration (10,000 nops), which narrows the gap between the spinlocks as raw acquire cost is amortized over the critical section.
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test -l 10000
+./bin/x86_64-linux-gcc-release/spinlock_test -l 10000
 ```
 
 #### 4. Tuning Backoff Algorithm
 Set the backoff window in nanoseconds, here 64 ns doubling up to 4 us. The window is timed, so the same values hold on P-cores, E-cores and aarch64 cores.
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test -m 64 -M 4096
+./bin/x86_64-linux-gcc-release/spinlock_test -m 64 -M 4096
 ```
 
 #### 5. Controlled Run (pinning + contender selection)
 Pin explicitly (here the four P-cores, which is also the default on this host) and compare only the TTAS lock against POSIX (dropping the MCS queue lock):
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test -t 4 -C 0-3 -K ttas,pspin
+./bin/x86_64-linux-gcc-release/spinlock_test -t 4 -C 0-3 -K ttas,pspin
 ```
 
 #### 6. Timer Slack
 Run the parking TTAS and the POSIX mutex with a 1 ns timer slack, so `nanosleep(1 us)` returns after ~2 us instead of ~50 us:
 ```bash
-./bin/x86_64-linux-gcc/release/spinlock_test -t 4 -C 0-3 -l 0 -o 0 -S 1 -K ttas_park,pmutex
+./bin/x86_64-linux-gcc-release/spinlock_test -t 4 -C 0-3 -l 0 -o 0 -S 1 -K ttas_park,pmutex
 ```
 
 ## Profiling & Tracing the Debug Build
 
-The debug build (`./bin/x86_64-linux-gcc/debug/spinlock_test`) suppresses inlining and ships full debug info, so every `static inline` helper resolves to a real call frame. Common workflows:
+The debug build (`./bin/x86_64-linux-gcc-debug/spinlock_test`) suppresses inlining and ships full debug info, so every `static inline` helper resolves to a real call frame. Common workflows:
 
 ```bash
 # Function-level user-space trace (uftrace)
-uftrace ./bin/x86_64-linux-gcc/debug/spinlock_test -t 8 -l 0 -i 100000
+uftrace ./bin/x86_64-linux-gcc-debug/spinlock_test -t 8 -l 0 -i 100000
 
 # Hot-path sampling with perf (DWARF call graph)
-perf record -F 999 --call-graph dwarf ./bin/x86_64-linux-gcc/debug/spinlock_test -t 8 -l 0 -i 100000
+perf record -F 999 --call-graph dwarf ./bin/x86_64-linux-gcc-debug/spinlock_test -t 8 -l 0 -i 100000
 perf report
 
 # Single-step into spin_lock_ttas under gdb
-gdb -ex 'b spin_lock_ttas' --args ./bin/x86_64-linux-gcc/debug/spinlock_test -t 2 -l 0 -i 1000
+gdb -ex 'b spin_lock_ttas' --args ./bin/x86_64-linux-gcc-debug/spinlock_test -t 2 -l 0 -i 1000
 
 # Syscall summary
-strace -c ./bin/x86_64-linux-gcc/debug/spinlock_test -t 4 -l 0 -i 100000
+strace -c ./bin/x86_64-linux-gcc-debug/spinlock_test -t 4 -l 0 -i 100000
 
 # Valgrind: memory errors, thread races, cache profile
-valgrind --tool=memcheck --leak-check=full ./bin/x86_64-linux-gcc/debug/spinlock_test -t 2 -l 0 -i 1000
-valgrind --tool=helgrind                    ./bin/x86_64-linux-gcc/debug/spinlock_test -t 4 -l 0 -i 1000
-valgrind --tool=drd                         ./bin/x86_64-linux-gcc/debug/spinlock_test -t 4 -l 0 -i 1000
-valgrind --tool=cachegrind                  ./bin/x86_64-linux-gcc/debug/spinlock_test -t 2 -l 500 -i 10000
+valgrind --tool=memcheck --leak-check=full ./bin/x86_64-linux-gcc-debug/spinlock_test -t 2 -l 0 -i 1000
+valgrind --tool=helgrind                    ./bin/x86_64-linux-gcc-debug/spinlock_test -t 4 -l 0 -i 1000
+valgrind --tool=drd                         ./bin/x86_64-linux-gcc-debug/spinlock_test -t 4 -l 0 -i 1000
+valgrind --tool=cachegrind                  ./bin/x86_64-linux-gcc-debug/spinlock_test -t 2 -l 500 -i 10000
 ```
 
 All commands above run unchanged on an aarch64 host. To drive a cross-built aarch64 binary from an x86 host, wrap it in QEMU's gdbstub and attach the cross debugger:
 
 ```bash
 make CC=aarch64-linux-gnu-gcc debug
-qemu-aarch64 -L /usr/aarch64-linux-gnu -g 1234 ./bin/aarch64-linux-gcc/debug/spinlock_test -t 2 -l 0 -i 1000 &
+qemu-aarch64 -L /usr/aarch64-linux-gnu -g 1234 ./bin/aarch64-linux-gcc-debug/spinlock_test -t 2 -l 0 -i 1000 &
 aarch64-linux-gnu-gdb -ex 'set sysroot /usr/aarch64-linux-gnu' -ex 'target remote :1234' \
-    -ex 'b spin_lock_ttas' ./bin/aarch64-linux-gcc/debug/spinlock_test
+    -ex 'b spin_lock_ttas' ./bin/aarch64-linux-gcc-debug/spinlock_test
 ```
 
 Use `make distclean` to scrub every debugger / profiler / tracer artifact (cores, valgrind dumps, perf.data, uftrace.data, `__pycache__`, CMake residue, …) on top of `make clean`'s build-only sweep.
 
-The release build (`./bin/<arch>-linux-gcc/release/spinlock_test`, or whatever `--binary` names) is what `test_bench.py` exercises and what produces the headline numbers below.
+The release build (`./bin/<arch>-linux-gcc-release/spinlock_test`, or whatever `--binary` names) is what `test_bench.py` exercises and what produces the headline numbers below.
 
 ## Benchmark Results
 *Test environment: Intel Core Ultra 5 226V (4 P-cores @ 4.5 GHz + 4 E-cores @ 3.5 GHz), Arch Linux, kernel `7.2.14-arch1-1`, GCC 16.2.1 release build (`-O3`), default timer slack 50,000 ns (`/proc/self/timerslack_ns`). Workers pinned to the four P-cores (`-C 0-3`). Each number is the median over 5 launches (3 for the longer critical section), each launch the geometric mean of 4 placement pages (`-P 0-3`), 1,000,000 iterations per thread and `-o 0` unless stated. `ns/acq` is elapsed time divided by the total number of acquisitions, and `min/max` is the median ratio of the earliest to the latest thread completion. The measured NOP cost is 0.111 ns.*
@@ -326,7 +326,7 @@ Each cell is a direct harness run, `-C <cpus> -t <threads> -l <nops> -o <nops> -
 
 Measurement and visualization are split into two scripts, so the plot can be iterated on without touching benchmark code:
 
-- **`test_bench.py`** runs the sweep — thread counts × workload intensities × the five contenders, aggregated as **Median ± MAD** over **7 launches per cell, up to 14 where the robust CV exceeds 5%**; each launch runs every lock on 4 pages (`-P 0-3`) and contributes their geometric mean — and writes the raw CSV of every measurement (`bench_results.csv`), a run-context sidecar (`bench_meta.json`, with the NOP cost, timer slack, seed and runnable-task counts), and a textual report. Launches run in a shuffled order, each with a shuffled lock order, after 3 discarded warmup launches; a launch is rejected when the harness exits non-zero or reports a wrong atomic count. The CSV keeps each run's launch index, page, lock position, context switches and the number of other runnable tasks at launch. Every launch is saturated (`-o 0`). To control variance it picks the fastest core class with the harness's rule (the P-cores on a P/E or big.LITTLE machine) and pins every worker to it via `-C`, sizing the thread sweep to that set; `--no-pin` disables it. It runs `bin/<arch>-linux-gcc/release/spinlock_test`; `--binary` selects another build, such as the Clang one. When the sweep finishes it hands off to the visualizer.
+- **`test_bench.py`** runs the sweep — thread counts × workload intensities × the five contenders, aggregated as **Median ± MAD** over **7 launches per cell, up to 14 where the robust CV exceeds 5%**; each launch runs every lock on 4 pages (`-P 0-3`) and contributes their geometric mean — and writes the raw CSV of every measurement (`bench_results.csv`), a run-context sidecar (`bench_meta.json`, with the NOP cost, timer slack, seed and runnable-task counts), and a textual report. Launches run in a shuffled order, each with a shuffled lock order, after 3 discarded warmup launches; a launch is rejected when the harness exits non-zero or reports a wrong atomic count. The CSV keeps each run's launch index, page, lock position, context switches and the number of other runnable tasks at launch. Every launch is saturated (`-o 0`). To control variance it picks the fastest core class with the harness's rule (the P-cores on a P/E or big.LITTLE machine) and pins every worker to it via `-C`, sizing the thread sweep to that set; `--no-pin` disables it. It runs `bin/<arch>-linux-gcc-release/spinlock_test`; `--binary` selects another build, such as the Clang one. When the sweep finishes it hands off to the visualizer.
 - **`plot.py`** renders the dashboard (`bench_result.png`) from the committed CSV alone. Run `python3 plot.py` to redraw after editing the plot, or `python3 test_bench.py --plot-only` for the same thing — both read the CSV and never modify it.
 
 The dashboard is a dark board (Binance-style design-system palette):
@@ -362,7 +362,7 @@ Both check binaries pass on x86-64 with GCC and Clang, and both pass under `qemu
 
 ### Validators
 
-The debug build (`./bin/x86_64-linux-gcc/debug/spinlock_test`) and the check suite were exercised under several validators (all five contenders selected):
+The debug build (`./bin/x86_64-linux-gcc-debug/spinlock_test`) and the check suite were exercised under several validators (all five contenders selected):
 
 | Tool | Scope | Result |
 | :--- | :--- | :--- |

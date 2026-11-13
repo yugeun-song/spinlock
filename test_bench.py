@@ -34,7 +34,7 @@ SETTLE_SEC: float = 0.3
 # struct fields ~4-16 ns) up to a medium CS where the locks converge. Anything
 # heavier is the wrong tool for a spinlock, so it is intentionally not sampled.
 WORKLOAD_RANGE: list[int] = [ 0, 16, 32, 64, 128, 256, 512, 1024 ]
-DEFAULT_BENCHMARK_BIN: Path = Path("./bin") / f"{platform.machine()}-linux-gcc" / "release" / "spinlock_test"
+DEFAULT_BENCHMARK_BIN: Path = Path("./bin") / f"{platform.machine()}-linux-gcc-release" / "spinlock_test"
 CSV_PATH: Path = Path("bench_results.csv")
 PNG_PATH: Path = Path("bench_result.png")
 META_PATH: Path = Path("bench_meta.json")
@@ -419,9 +419,9 @@ def main() -> None:
              "highest-frequency core group on heterogeneous P/E or big.LITTLE machines).")
     parser.add_argument(
         "--binary", type=Path, default=DEFAULT_BENCHMARK_BIN,
-        help="Benchmark executable to run (default: %(default)s, the 'make' release "
-             "build for this host; pass bin/<arch>-linux-clang/release/spinlock_test "
-             "for a 'make CC=clang' build).")
+        help="Benchmark executable to run (default: %(default)s, the 'make release' "
+             "build for this host; pass bin/<arch>-linux-clang-release/spinlock_test "
+             "for a 'make release CC=clang' build).")
     parser.add_argument(
         "--seed", type=int, default=None,
         help="Seed for the shuffled schedule and lock order (default: random, recorded in the meta file).")
@@ -439,7 +439,7 @@ def main() -> None:
         return
 
     if not os.access(cli.binary, os.X_OK):
-        print(f"Error: {cli.binary} not found or not executable. Run 'make' first.",
+        print(f"Error: {cli.binary} not found or not executable. Run 'make release' first.",
               file=sys.stderr)
         sys.exit(1)
 
