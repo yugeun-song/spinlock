@@ -295,8 +295,9 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunn
     print(f"  - Timer Slack     : {slack} ns")
     print(line)
     print("TEST PARAMETERS:")
-    print(f"  - Aggregation     : Median ± MAD of {REPEATS}-{REPEATS_MAX} launches per cell "
-          f"(more when robust CV > {NOISY_CELL_CV:.0%}), {WARMUP_LAUNCHES} warmup launches discarded")
+    print(f"  - Aggregation     : median ± median absolute deviation (MAD) of {REPEATS}-{REPEATS_MAX} "
+          f"launches per cell (more when the robust coefficient of variation (CV) > "
+          f"{NOISY_CELL_CV:.0%}), {WARMUP_LAUNCHES} warmup launches discarded")
     print(f"  - Placement       : each launch value is the geometric mean of {PLACEMENTS_PER_LAUNCH} runs, "
           f"one per page of lock placement (-P 0-{PLACEMENTS_PER_LAUNCH - 1})")
     lock_settings = next((values for record in records for values in record["locks"].values()), None)
@@ -316,6 +317,7 @@ def print_report(cpu_model: str, num_cpus: int, l1_cache: str, runner: SweepRunn
     print(f"  - Total Raw Ops   : {total_raw_cycles:,} cycles performed")
     print(f"  - Pinning         : {pin_desc}")
     print(f"  - Bench Duration  : {duration:.2f} seconds")
+    print("  - CS (ns)         : critical section length, Workload (NOPs) times the NOP cost")
     print(sep)
     print(f"{'Workload (NOPs)':<16} | {'CS (ns)':<8} | {'Threads':<8} | {'Launches':<8} | "
           f"{'TTAS (ms)':<18} | {'TTAS park (ms)':<18} | {'MCS (ms)':<18} | "
