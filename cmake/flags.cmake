@@ -3,7 +3,7 @@ check_compiler_flag_common_patterns(flag_fail_patterns)
 
 set(gnu_strict -Werror)
 set(gnu_strict_link -Wl,--fatal-warnings)
-set(gnu_common -Wall -Wextra -pedantic -Wshadow)
+set(gnu_common -Wall -Wextra -pedantic -Wshadow -Wformat -Werror=format-security)
 set(gnu_debug
     -O0
     -ggdb3
@@ -38,8 +38,6 @@ set(gnu_release
     -fstack-clash-protection
     -fno-omit-frame-pointer
     -mno-omit-leaf-frame-pointer
-    -Wformat
-    -Werror=format-security
     -fcf-protection=full
     -mbranch-protection=standard
     -U_FORTIFY_SOURCE
