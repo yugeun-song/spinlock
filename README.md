@@ -22,86 +22,60 @@ This project provides custom spinlocks using architecture-specific inline assemb
 - **Core types**: on parts with more than one core class (Intel P/E, Arm big.LITTLE) the harness pins workers to the fastest class unless `-C` says otherwise. It reads `cpu_capacity` (else `cpufreq/cpuinfo_max_freq`) for every allowed CPU, keeps those within 80% of the highest value, and fills one hardware thread per physical core first. Homogeneous parts are not pinned.
 - **OS**: Linux
 - **Compilers**: GCC or Clang (Standard: `gnu99`)
-- **Build Systems**: GNU Make (≥ 4.3) and CMake (≥ 3.16)
-- **Build Modes** (all three carry the same warning set, `-Wall -Wextra -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings -Wvla -Wundef -Wnull-dereference -Wimplicit-fallthrough -Wdouble-promotion -Wconversion -Wsign-conversion`, and the same compile-time hardening, `-fstack-protector-strong -fstack-clash-protection -fcf-protection=full` (`-mbranch-protection=standard` on aarch64) `-fPIE`; release and debug also link with `-pie -Wl,-z,relro,-z,now,-z,noexecstack`):
-  - **Release**: `-O3 -D_FORTIFY_SOURCE=3 -fno-omit-frame-pointer -fasynchronous-unwind-tables` — optimized for benchmarking with frame pointers and unwind tables preserved for `perf` and flame graphs. The hardening flags touch no instruction in the lock hot paths; an A/B run of old flags against new flags on this host stayed inside run-to-run noise.
-  - **Debug**: `-O0 -g3 -DSPINLOCK_DEBUG -fno-inline -fno-inline-functions -fno-optimize-sibling-calls -rdynamic` — every `static inline` helper resolves to a real call frame so `uftrace`, `gdb`, `strace`, and `perf` can step into each function. `SPINLOCK_DEBUG` compiles in misuse checks that abort at the offending call: `spin_unlock_ttas` on a lock that is not held, `spin_unlock_mcs_node` on an empty queue, and a nested `spin_lock_mcs` wrapper call. Each check is a plain load on a path the caller already owns and never touches the lock protocol.
-  - **Sanitize**: `-O1 -g -DSPINLOCK_DEBUG -ftls-model=local-exec -fsanitize=address,undefined -fno-sanitize-recover=all` — the correctness suite under ASan + UBSan, built by `make` when the toolchain has the sanitizer runtimes and run by `make sanitize`. `-ftls-model=local-exec` avoids a GCC 16 false positive (see [Validators](#validators)).
+- **Build System**: CMake with Ninja Multi-Config presets, driven by `build.cmake` through `make`, `./build.sh` or `cmake -P build.cmake --`
+- **Build Modes** (`cmake/flags.cmake`, shared with the other repositories that build with CMake; every mode adds `-Wall -Wextra -pedantic -Wshadow` and this project's `-Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings -Wvla -Wundef -Wnull-dereference -Wimplicit-fallthrough -Wdouble-promotion -Wconversion -Wsign-conversion`):
+  - **Debug**: `-O0 -ggdb3 -fno-inline -fno-optimize-sibling-calls -fno-omit-frame-pointer -DSPINLOCK_DEBUG`, no injected hardening, no PIE, `-rdynamic`, `-pg` — every `static inline` helper resolves to a real call frame so `uftrace`, `gdb`, `strace`, and `perf` can step into each function. `SPINLOCK_DEBUG` compiles in misuse checks that abort at the offending call.
+  - **Sanitize**: Debug plus `-fsanitize=address` (or the list in `SANITIZE=`), `-fno-sanitize-recover=all` and `-ftls-model=local-exec`, which avoids a GCC 16 `-fsanitize=null` false positive when `undefined` is in the list (see [Validators](#validators)). Toolchains without sanitizer runtimes skip it with a note.
+  - **Release**: `-O2 -g`, `-fstack-protector-strong -fstack-clash-protection -D_FORTIFY_SOURCE=3`, `-fcf-protection=full` or `-mbranch-protection=standard`, frame pointers, PIE, full RELRO and LTO, as distributions ship. The benchmark tables below were measured with the earlier `-O3` release build.
 - **Warnings**: no errors under either compiler. The only warnings are intentional unused ones: `-Wunused-parameter` on the check suite's shared-signature lock callbacks and `-Wunused-function` on `report_skip` in `SPINLOCK_DEBUG` builds. They are never silenced (no `(void)` casts, unused attributes or `-Wno-*` flags); every other warning is fixed.
 - **Code Style**: LLVM-based `.clang-format` — 4-space indent, right-aligned pointers, Allman function braces, K&R control flow, 100-column soft limit. C files are ordered: preprocessor, types (`typedef`/`struct`/`union`/`enum`), variables, functions; a table of function pointers (`g_contenders`) follows the functions it references.
 
 ## Build Instructions
 
-Both build systems write each program to `bin/<arch>-linux-<compiler>/<config>/` (`<arch>` from `$(CC) -dumpmachine`, `<compiler>` is `gcc` or `clang`), so GCC, Clang and cross builds coexist. GCC is the default.
-
-### Make
+Each program goes to `bin/<arch>-linux-<compiler>-<config>/`, so GCC, Clang and cross builds coexist. GCC is the default.
 
 ```bash
-make                  # everything in parallel: all binaries + compile_commands.json, tags, cscope.out
-make -j4              # cap the parallel jobs (same as make JOBS=4); -j1 builds serially
-make CC=clang         # the same set built with Clang, into bin/x86_64-linux-clang/
-# or build a single configuration:
-make release          # bin/<arch>-linux-<compiler>/release/{spinlock_test,spinlock_check}
-make debug            # bin/<arch>-linux-<compiler>/debug/{spinlock_test,spinlock_check}
-make index            # compile_commands.json + tags + cscope.out only
-
-make check            # run the correctness suite on the release and debug check binaries
-make sanitize         # build the suite with ASan + UBSan and run it
+make                  # Debug and Sanitize (all); one Ninja job per CPU
+make release          # bin/<arch>-linux-<compiler>-release/{spinlock_test,spinlock_check}
+make debug            # bin/<arch>-linux-<compiler>-debug/{spinlock_test,spinlock_check}
+make sanitize         # the Sanitize build, address by default; make sanitize SANITIZE=address,undefined
+make CC=clang         # the same with Clang; PRESET=<preset> picks any preset in CMakePresets.json
+make check            # build every config the toolchain can link and run the tests in each
+make index            # compile_commands.json, tags and cscope.out in the source root
+make clean-index      # remove them again
 make lsp-check        # let clangd parse every file and print its errors
-make tidy             # clang-tidy over every translation unit
-make clean            # remove bin/ (and a CMake build/); keep indexes and tool output
-make distclean        # clean + indexes, caches and every debugger / profiler artifact
+make tidy             # clang-tidy over every translation unit with .clang-tidy
+make unused           # unused diagnostics (clang) and unused functions (cppcheck)
+make clean            # remove bin/ and the build products; configured trees stay configured
+make distclean        # clean, the index, build/, caches and every debugger / profiler artifact
 ```
 
-- Without `-j`, make runs `nproc` jobs (GNU Make ≥ 4.3); `-jN` or `JOBS=N` overrides it.
-- Several goals run one at a time in the given order, so `make clean all` is safe.
-- `make all` never runs tests: concurrent stress tests oversubscribe the cores (three check binaries together ran past 120 s, versus 2–3 s alone).
-- Toolchains without sanitizer runtimes (e.g. `aarch64-linux-gnu-gcc`) skip the sanitize build with a notice.
-- Each binary records its build command and compiler version in `.<program>.cmd`; changing `CC`, `ARCH_CFLAGS` or any flag rebuilds only the affected binaries.
+`./build.sh` and `cmake -P build.cmake --` take the same verbs, a preset name and `SANITIZE=`. Several goals run one at a time in the given order, so `make clean all` is safe. `make all` never runs tests: concurrent stress tests oversubscribe the cores (three check binaries together ran past 120 s, versus 2–3 s alone). `make check` runs `spinlock_check` and a short benchmark whose atomic counts must all be OK, in Debug, Sanitize and Release.
 
 ### Editor integration: clangd, ctags, cscope
 
-`make all` (or `make index`) writes three files into the source root, all ignored by git:
+`make index` writes three files into the source root, all ignored by git:
 
-- **`compile_commands.json`** — one entry per translation unit with the exact release flags. clangd reads it and parses each `.c` file, and each header through the `.c` that includes it, as `gnu99` C for the compiler's target. Without this file clangd falls back to a bare `clang <file>`, which treats a `.h` as Objective-C++ and knows neither the standard nor `_GNU_SOURCE`: that fallback is where the spurious errors and missed real ones came from. The Makefile regenerates the file whenever the content would differ, so `make CC=aarch64-linux-gnu-gcc compdb` flips clangd to the aarch64 branch of `spinlock.h` (clangd reads the target from the compiler name) and `make compdb` flips it back.
-- **`tags`** — Universal Ctags with prototypes, externs and qualified names (`--kinds-C=+px --fields=+iaSn --extras=+q`) over the project sources only.
+- **`compile_commands.json`** — the Debug entry of every translation unit. clangd reads it and parses each `.c` file, and each header through the `.c` that includes it, as `gnu99` C for the compiler's target.
+- **`tags`** — Universal Ctags over the tracked sources and headers.
 - **`cscope.out`** (plus `cscope.files`, `cscope.in.out`, `cscope.po.out`) — built in kernel mode (`-k`) from the same file list, so it indexes the project and not `/usr/include`.
 
-The checked-in **`.clangd`** adds `-ferror-limit=0`, strips the GCC-only flags clang would reject, keeps the include cleaner on (`UnusedIncludes: Strict`, with `MissingIncludes` off because glibc's transitive includes make it guess wrong), and enables a clang-tidy set (`bugprone-*`, `cert-*`, `clang-analyzer-*`, `misc-*`, `performance-*`, `portability-*`, `readability-*`) minus the checks that are noise on this code base: `cert-err33-c` (unchecked `printf` return values), `concurrency-mt-unsafe` (`getopt`/`strtol`/`exit` from a single-threaded `main`), `readability-use-concise-preprocessor-directives` (the `#if defined(...)` chains that keep `#elif` legible), `bugprone-reserved-identifier` (`_GNU_SOURCE`) and the magic-number / identifier-length / cognitive-complexity style checks. **`.clang-tidy`** mirrors that list so `make tidy` and the editor agree. clang-tidy 23 reports only `portability-no-assembler` (inline asm), `readability-trailing-comma` and `misc-unused-parameters` (the lock callbacks). `make lsp-check` runs `clangd --check` over every file with the database in place and fails on any error (`clangd --check` prints errors only; warnings show in the editor).
-
-CMake users get the same indexes from `cmake --build build --target index`, which copies `build/compile_commands.json` to the source root and runs ctags and cscope there.
-
-### CMake
-
-```bash
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build          # runs both check binaries
-
-# or with Clang:
-CC=clang cmake -S . -B build
-cmake --build build -j
-```
-
-CMake writes the release and debug programs to the same `bin/<arch>-linux-<compiler>/{release,debug}/` folders as Make. The sanitize build is Makefile-only.
+The checked-in **`.clangd`** adds `-ferror-limit=0`, strips the GCC-only flags clang would reject, keeps the include cleaner on (`UnusedIncludes: Strict`, with `MissingIncludes` off because glibc's transitive includes make it guess wrong), and enables the same clang-tidy checks as `.clang-tidy`.
 
 ### aarch64
 
-On an aarch64 host, `make` and `cmake` work unchanged. To cross-build from an x86 host, just point the build at the cross compiler: the Makefile reads the target triple from `$(CC) -dumpmachine`, so an aarch64 compiler automatically gets the v8.0 baseline `-march=armv8-a` (the portable `ldaxr`/`stlxr` LL/SC atomics). Run the result under QEMU:
+On an aarch64 host the default preset is `aarch64-linux-gcc`. From an x86 host the aarch64 presets cross-build, and `make check` runs the tests under `qemu-aarch64`:
 
 ```bash
-make CC=aarch64-linux-gnu-gcc
-qemu-aarch64 -L /usr/aarch64-linux-gnu ./bin/aarch64-linux-gcc/release/spinlock_test -t 4 -l 0 -i 100000
+make PRESET=aarch64-linux-gcc release check
+qemu-aarch64 -L /usr/aarch64-linux-gnu ./bin/aarch64-linux-gcc-release/spinlock_test -t 4 -l 0 -i 100000
 ```
 
-To emit the single-instruction LSE atomics (`casa` acquire, `swpal`/`casl` for the MCS queue) instead of the LL/SC fallback, target an LSE-capable architecture via `ARCH_CFLAGS` (Make) or `-DARCH_LSE=ON` (CMake):
+The aarch64 build targets the v8.0 baseline (`-march=armv8-a`, LL/SC). To emit the single-instruction LSE atomics (`casa` acquire, `swpal`/`casl` for the MCS queue), configure the preset once with `ARCH_LSE` on; later builds keep it:
 
 ```bash
-make CC=aarch64-linux-gnu-gcc ARCH_CFLAGS='-march=armv8.1-a'   # or -mcpu=neoverse-n1
-cmake -S . -B build -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DARCH_LSE=ON && cmake --build build -j
+cmake --preset aarch64-linux-gcc -DARCH_LSE=ON && make PRESET=aarch64-linux-gcc release
 ```
-
-Both land in `bin/aarch64-linux-gcc/`; switching between them rebuilds automatically.
 
 A fully static binary (no sysroot needed to run under QEMU) can be built directly:
 
@@ -112,18 +86,18 @@ aarch64-linux-gnu-gcc -O3 -std=gnu99 -Wall -Wextra -static -march=armv8.1-a \
 
 Confirm which path was compiled in by disassembling: `casa`/`swpal` means the LSE path, `ldaxr`/`stlxr` means the LL/SC fallback.
 
-### Artifacts (in `bin/<arch>-linux-<compiler>/`)
+### Artifacts (in `bin/<arch>-linux-<compiler>-<config>/`)
 
 | Folder | Programs | Built by |
 | :--- | :--- | :--- |
-| `release/` | `spinlock_test`, `spinlock_check` | `make`, `make release` |
-| `debug/` | `spinlock_test`, `spinlock_check` | `make`, `make debug` |
-| `sanitize/` | `spinlock_check` | `make`, `make sanitize` |
+| `…-release/` | `spinlock_test`, `spinlock_check` | `make release` |
+| `…-debug/` | `spinlock_test`, `spinlock_check` | `make`, `make debug` |
+| `…-sanitize/` | `spinlock_test`, `spinlock_check` | `make`, `make sanitize` |
 
-- `release/spinlock_test` — **release build**, used for benchmarking and the headline numbers below.
-- `debug/spinlock_test` — **debug build**, used with `uftrace`, `gdb`, `strace`, `perf`, and other analysis tools. Inlining is fully suppressed and `-rdynamic` exposes all symbols, so every helper appears as a real call frame.
-- `release/spinlock_check` / `debug/spinlock_check` — the **correctness suite** (see [Stability & Sanity Checks](#stability--sanity-checks)) built with the release and the debug flags; `make check` runs both. `SPINLOCK_CHECK_ITERATIONS=<n>` shrinks the contended passes, for example under valgrind.
-- `sanitize/spinlock_check` — the suite under AddressSanitizer + UndefinedBehaviorSanitizer, run by `make sanitize`.
+- `…-release/spinlock_test` — **release build**, used for benchmarking and the headline numbers below.
+- `…-debug/spinlock_test` — **debug build**, used with `uftrace`, `gdb`, `strace`, `perf`, and other analysis tools. Inlining is fully suppressed and `-rdynamic` exposes all symbols, so every helper appears as a real call frame.
+- `…-release/spinlock_check` / `…-debug/spinlock_check` — the **correctness suite** (see [Stability & Sanity Checks](#stability--sanity-checks)) built with the release and the debug flags; `make check` runs both. `SPINLOCK_CHECK_ITERATIONS=<n>` shrinks the contended passes, for example under valgrind.
+- `…-sanitize/spinlock_check` — the suite under AddressSanitizer, or the sanitizers in `SANITIZE=`, run by `make check`.
 
 ### Source layout
 - `spinlock.h` — the three lock disciplines, header-only apart from the definitions below.
@@ -393,7 +367,7 @@ The debug build (`./bin/x86_64-linux-gcc/debug/spinlock_test`) and the check sui
 | **valgrind memcheck** (`--leak-check=full`, benchmark and check suite) | memory errors / leaks | **0 errors** |
 | **valgrind drd** | data races | **0 errors** |
 | **valgrind helgrind** | data races | 60 errors / 10 contexts (false positives, custom locks only); **0 errors** with `-K pspin,pmutex` |
-| **AddressSanitizer + UBSan** (`make sanitize`, GCC and Clang) | memory + UB | **clean, 16/16 checks pass** |
+| **AddressSanitizer + UBSan** (`make check SANITIZE=address,undefined`, GCC and Clang) | memory + UB | **clean, 16/16 checks pass** |
 | **ThreadSanitizer** (`-fsanitize=thread`) | data races | a few warnings, count varies run to run (false positives, custom locks only), atomic count OK |
 
 One tool finding was itself a false positive and is documented rather than worked around in the code: GCC 16's `-fsanitize=null` reports `member access within null pointer` for the extern thread-local MCS node when the code is compiled at `-O1` with the initial-exec or dynamic TLS models. The address is non-null at run time (checked in gdb: the handler is called with a literal `0` while `&spin_mcs_thread_local_node` reads a valid address), the report vanishes at `-O0`, under Clang, and with `-ftls-model=local-exec`. `make sanitize` therefore builds with `-ftls-model=local-exec`, which is the correct model for an executable that defines all of its own thread-locals.

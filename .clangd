@@ -1,5 +1,5 @@
 # Project clangd configuration. It rides on compile_commands.json, which
-# 'make all' (or 'make compdb') writes with the exact release flags, so every
+# 'make index' writes with the Debug flags, so every
 # translation unit and every header is parsed as gnu99 C for this target
 # instead of clangd's fallback (a bare 'clang <file>' that treats a .h as
 # Objective-C++). That fallback is where the spurious errors came from.
