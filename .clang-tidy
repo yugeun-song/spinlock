@@ -1,4 +1,4 @@
-# Mirrors the ClangTidy block of .clangd so 'make tidy' and the editor agree.
+# clangd reads this file too, so 'make tidy' and the editor run the same checks.
 # Removed checks are noise on this code base, not bugs: printf return values
 # (cert-err33-c), getopt/strtol/exit flagged as not thread-safe from a
 # single-threaded main (concurrency-mt-unsafe), the '#if defined(...)' chains

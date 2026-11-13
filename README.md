@@ -60,7 +60,7 @@ make distclean        # clean, the index, build/, caches and every debugger / pr
 - **`tags`** — Universal Ctags over the tracked sources and headers.
 - **`cscope.out`** (plus `cscope.files`, `cscope.in.out`, `cscope.po.out`) — built in kernel mode (`-k`) from the same file list, so it indexes the project and not `/usr/include`.
 
-The checked-in **`.clangd`** adds `-ferror-limit=0`, strips the GCC-only flags clang would reject, keeps the include cleaner on (`UnusedIncludes: Strict`, with `MissingIncludes` off because glibc's transitive includes make it guess wrong), and enables the same clang-tidy checks as `.clang-tidy`.
+The checked-in **`.clangd`** only turns inlay hints off. Without it clangd already drops the GCC-only flags it does not know, keeps the include cleaner at its defaults (`UnusedIncludes: Strict`, `MissingIncludes: None`), and runs the checks in `.clang-tidy`.
 
 ### aarch64
 
