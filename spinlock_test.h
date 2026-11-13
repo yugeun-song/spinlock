@@ -1,9 +1,9 @@
 #ifndef SPINLOCK_TEST_H
 #define SPINLOCK_TEST_H
 
-#include "spinlock.h"
-
 #include <limits.h>
+
+#include "spinlock.h"
 
 #define DEFAULT_ITERATIONS 1000000
 #define DEFAULT_CRITICAL_SECTION_NS 50
@@ -49,7 +49,7 @@ struct bench_results {
 
 void bench_detect_topology(void);
 
-void bench_parse_args(int argc, char *argv[]);
+void bench_parse_args(int argc, char *const *const argv);
 
 void bench_lock_memory(void);
 
@@ -57,12 +57,12 @@ void bench_calibrate(void);
 
 void bench_print_config(void);
 
-void bench_warmup_all(void);
+void bench_warm_up_all(void);
 
-void bench_run_all(struct bench_results *results);
+void bench_run_all(struct bench_results *const mut_results_nullable);
 
-void bench_print_summary(const struct bench_results *results);
+void bench_print_summary(const struct bench_results *const results_nullable);
 
-void bench_cleanup(void);
+void bench_clean_up(void);
 
-#endif
+#endif /* SPINLOCK_TEST_H */

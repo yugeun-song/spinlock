@@ -1,26 +1,29 @@
----
-Language: Cpp
 BasedOnStyle: LLVM
 IndentWidth: 4
-TabWidth: 4
-UseTab: Never
+ColumnLimit: 0
 BreakBeforeBraces: Custom
 BraceWrapping:
     AfterFunction: true
-    AfterControlStatement: Never
-    AfterStruct: false
-    AfterUnion: false
-    AfterEnum: false
-    AfterClass: false
-    BeforeElse: false
-    BeforeCatch: false
-    IndentBraces: false
 InsertBraces: true
-AllowShortBlocksOnASingleLine: false
-AllowShortIfStatementsOnASingleLine: false
-AllowShortLoopsOnASingleLine: false
-AllowShortFunctionsOnASingleLine: None
-PointerAlignment: Right
-ColumnLimit: 100
-PenaltyExcessCharacter: 1
-SortIncludes: false
+AllowShortFunctionsOnASingleLine:
+    Empty: false
+    Inline: false
+    Other: false
+AllowShortEnumsOnASingleLine: false
+Cpp11BracedListStyle: Block
+AlignTrailingComments:
+    Kind: Never
+AlignEscapedNewlines: Left
+IndentPPDirectives: AfterHash
+PPIndentWidth: 1
+IncludeBlocks: Regroup
+IncludeCategories:
+    - Regex: '^<readline/'
+      Priority: 1
+      SortPriority: 2
+    - Regex: '^<'
+      Priority: 1
+      SortPriority: 1
+    - Regex: '^"'
+      Priority: 3
+InsertNewlineAtEOF: true

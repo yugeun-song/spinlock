@@ -1,4 +1,14 @@
-* text=auto eol=lf
-*.c text working-tree-encoding=UTF-8
-*.h text working-tree-encoding=UTF-8
-Makefile text working-tree-encoding=UTF-8
+* text eol=lf
+
+*.o binary
+*.a binary
+*.so binary
+*.bin binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.xz binary
