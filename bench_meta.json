@@ -8,10 +8,10 @@
     4,
     8
   ],
-  "kernel": "7.2.14-arch1-1",
-  "nop_ns": 0.1115,
+  "kernel": "7.2.15-arch1-1",
+  "nop_ns": 0.0557,
   "timer_slack_ns": 50000,
-  "seed": 913861928,
+  "seed": 424929759,
   "repeats": 7,
   "repeats_max": 14,
   "noisy_cell_cv": 0.05,

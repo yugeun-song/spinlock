@@ -23,10 +23,10 @@ This project provides custom spinlocks using architecture-specific inline assemb
 - **OS**: Linux
 - **Compilers**: GCC or Clang (Standard: `gnu99`)
 - **Build System**: CMake with Ninja Multi-Config presets, driven by `build.cmake` through `make`, `./build.sh` or `cmake -P build.cmake --`
-- **Build Modes** (`cmake/flags.cmake`, shared with the other repositories that build with CMake; every mode adds `-Wall -Wextra -pedantic -Wshadow` and this project's `-Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings -Wvla -Wundef -Wnull-dereference -Wimplicit-fallthrough -Wdouble-promotion -Wconversion -Wsign-conversion`):
+- **Build Modes** (`cmake/flags.cmake`, shared with the other repositories that build with CMake; every mode adds `-Wall -Wextra -pedantic -Wshadow -Wformat -Werror=format-security` and this project's `-Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings -Wvla -Wundef -Wnull-dereference -Wimplicit-fallthrough -Wdouble-promotion -Wconversion -Wsign-conversion -Wno-unused-parameter`):
   - **Debug**: `-O0 -ggdb3 -fno-inline -fno-optimize-sibling-calls -fno-omit-frame-pointer -DSPINLOCK_DEBUG`, no default hardening, no PIE, `-rdynamic`, `-pg` — every `static inline` helper resolves to a real call frame so `uftrace`, `gdb`, `strace`, and `perf` can step into each function. `SPINLOCK_DEBUG` compiles in misuse checks that abort at the offending call.
   - **Sanitize**: Debug plus `-fsanitize=address` (or the list in `SANITIZE=`), `-fno-sanitize-recover=all` and `-ftls-model=local-exec`, which avoids a GCC 16 `-fsanitize=null` false positive when `undefined` is in the list (see [Validators](#validators)). Toolchains without sanitizer runtimes skip it with a note.
-  - **Release**: `-O2 -g`, `-fstack-protector-strong -fstack-clash-protection -D_FORTIFY_SOURCE=3`, `-fcf-protection=full` or `-mbranch-protection=standard`, frame pointers, PIE, full RELRO and link-time optimization (LTO), as distributions ship. The benchmark tables below were measured with the earlier `-O3` release build.
+  - **Release**: `-O2 -g`, `-fstack-protector-strong -fstack-clash-protection -D_FORTIFY_SOURCE=3`, `-fcf-protection=full` or `-mbranch-protection=standard`, frame pointers, PIE, full RELRO and link-time optimization (LTO), as distributions ship.
 - **Warnings**: no errors under either compiler. The check suite's lock callbacks share one signature, so the parameters each leaves unused carry no information: the build passes `-Wno-unused-parameter`. The only remaining warning is `-Wunused-function` on `report_skip` in `SPINLOCK_DEBUG` builds, which call it only without that macro. Nothing is silenced in the source (no `(void)` casts or unused attributes); every other warning is fixed.
 - **Code Style**: the [c-programming coding style](https://github.com/yugeun-song/c-programming/blob/main/docs/coding-style.md). `.clang-format` holds its formatting part; naming, pointer parameters, explicit comparisons and the other rules are kept by hand. The contender table `gs_contenders` sits with the other file-scope variables, after forward declarations of the worker routines it points to.
 
@@ -83,7 +83,7 @@ cmake --preset aarch64-linux-gcc -DARCH_LSE=ON && make PRESET=aarch64-linux-gcc 
 A fully static binary (no sysroot needed to run under QEMU) can be built directly:
 
 ```bash
-aarch64-linux-gnu-gcc -O3 -std=gnu99 -Wall -Wextra -static -march=armv8.1-a \
+aarch64-linux-gnu-gcc -O2 -std=gnu99 -Wall -Wextra -static -march=armv8.1-a \
     spinlock.c spinlock_test.c main.c -o spinlock_test_arm64_lse -pthread
 ```
 
@@ -212,33 +212,33 @@ Use `make distclean` to scrub every debugger / profiler / tracer artifact (cores
 The release build (`./bin/<arch>-linux-gcc-release/spinlock_test`, or whatever `--binary` names) is what `test_bench.py` exercises and what produces the headline numbers below.
 
 ## Benchmark Results
-*Test environment: Intel Core Ultra 5 226V (4 P-cores @ 4.5 GHz + 4 E-cores @ 3.5 GHz), Arch Linux, kernel `7.2.14-arch1-1`, GCC 16.2.1 release build (`-O3`), default timer slack 50,000 ns (`/proc/self/timerslack_ns`). Workers pinned to the four P-cores (`-C 0-3`). Each number is the median over 5 launches (3 for the longer critical section), each launch the geometric mean of 4 placement pages (`-P 0-3`), 1,000,000 iterations per thread and `-o 0` unless stated. `ns/acq` is elapsed time divided by the total number of acquisitions, and `min/max` is the median ratio of the earliest to the latest thread completion. The measured NOP cost is 0.111 ns.*
+*Test environment: Intel Core Ultra 5 226V (4 P-cores @ 4.5 GHz + 4 E-cores @ 3.5 GHz), Arch Linux, kernel `7.2.15-arch1-1`, GCC 16.2.1 release build (`-O2`), default timer slack 50,000 ns (`/proc/self/timerslack_ns`). Workers pinned to the four P-cores (`-C 0-3`). Each number is the median over 5 launches (3 for the longer critical section), each launch the geometric mean of 4 placement pages (`-P 0-3`), 1,000,000 iterations per thread and `-o 0` unless stated, with the lock order shuffled per launch. `ns/acq` is elapsed time divided by the total number of acquisitions, and `min/max` is the median ratio of the earliest to the latest thread completion. The measured NOP cost is 0.056 ns: GCC 16 at `-O2` unrolls the filler loop to two NOPs per iteration, and a P-core retires four NOPs per cycle.*
 
-**What the harness rewards.** Each thread performs a fixed number of acquisitions and the elapsed time is the wall time until the *last* thread finishes; there is no fairness term. On the same four cores a contended hand-off costs every lock about the same, because the lock word (or the MCS flag) has to move between cores: ≈ 85–105 ns per acquisition here for the POSIX spinlock, the POSIX mutex and MCS. A lock that finishes several times sooner is doing different work: its waiters stay away from the lock while one thread re-acquires uncontended at ≈ 9 ns. The `min/max` column shows only whether the threads finished together (`1.00`) or one ran through while the others waited (`0.4–0.6`); it does not show how often the lock changed hands. A build that counts owner changes inside the critical section (one extra load and compare per acquisition, 12 runs per cell on the P-cores) shows that directly. Saturated, MCS hands over on 96–100% of acquisitions, `pthread_spin_lock` on 5–21%, `ttas` on 1.5–13% and `ttas_park` on under 1%. With 150 ns of work outside the lock every lock hands over on 96–100%.
+**What the harness rewards.** Each thread performs a fixed number of acquisitions and the elapsed time is the wall time until the *last* thread finishes; there is no fairness term. On the same four cores a contended hand-off costs every lock about the same, because the lock word (or the MCS flag) has to move between cores: ≈ 90–105 ns per acquisition here for the POSIX spinlock, the POSIX mutex and MCS. A lock that finishes several times sooner is doing different work: its waiters stay away from the lock while one thread re-acquires uncontended at ≈ 10 ns. The `min/max` column shows only whether the threads finished together (`1.00`) or one ran through while the others waited (`0.4–0.7`); it does not show how often the lock changed hands. A build that counts owner changes inside the critical section (one extra load and compare per acquisition, 12 runs per cell on the P-cores, 2–8 threads) shows that directly. Saturated, MCS hands over on 98–100% of acquisitions, the mutex on 24–76%, `pthread_spin_lock` on up to 23%, `ttas` on up to 13% and `ttas_park` on under 1%; with 50 ns inside the lock and nothing outside, the three spinlocks keep the lock on one thread for all but a handful of acquisitions. With 150 ns of work outside the lock every lock hands over on 90–100%.
 
 ### Default run (`-t 4`: ≈ 50 ns inside the lock, ≈ 150 ns outside it)
 
 | Lock | Elapsed (ms) | ns/acq | min/max |
 | :--- | ---: | ---: | ---: |
-| `ttas` | 716.5 | 179.1 | 0.93 |
-| `ttas_park` | 634.1 | 158.5 | 0.85 |
-| `pspin` | 859.2 | 214.8 | 0.93 |
-| `pmutex` | 1,081.6 | 270.4 | 0.97 |
-| `mcs` | 612.8 | 153.2 | 1.00 |
+| `ttas` | 761.2 | 190.3 | 0.92 |
+| `ttas_park` | 698.8 | 174.7 | 0.83 |
+| `pspin` | 921.4 | 230.4 | 0.96 |
+| `pmutex` | 1,190.1 | 297.5 | 0.97 |
+| `mcs` | 663.7 | 165.9 | 1.00 |
 
-With work outside the lock the lock is busy most of the time but not saturated, so the hand-off decides. MCS is fastest: each release passes the lock to one known waiter. `ttas` is 1.20x ahead of `pthread_spin_lock` at the same fairness, `ttas_park` gains by parking waiters, and the mutex pays a futex wake per contended hand-off.
+With work outside the lock the lock is busy most of the time but not saturated, so the hand-off decides. MCS is fastest: each release passes the lock to one known waiter. `ttas` is 1.21x ahead of `pthread_spin_lock` at similar fairness, `ttas_park` gains by parking waiters, and the mutex pays a futex wake per contended hand-off.
 
 ### 4 threads, empty critical section (`-t 4 -l 0 -o 0`)
 
 | Lock | Elapsed (ms) | ns/acq | min/max |
 | :--- | ---: | ---: | ---: |
-| `ttas` (timed backoff, 32–1,024 ns) | 256.6 | 64.2 | 0.95 |
-| `ttas_park` (spin, then 1 us park) | 38.7 | 9.7 | 0.63 |
-| `pspin` (`pthread_spin_lock`) | 337.4 | 84.4 | 0.66 |
-| `pmutex` (`pthread_mutex_lock`) | 415.1 | 103.8 | 0.95 |
-| `mcs` | 402.4 | 100.6 | 1.00 |
+| `ttas` (timed backoff, 32–1,024 ns) | 271.7 | 67.9 | 0.93 |
+| `ttas_park` (spin, then 1 us park) | 38.8 | 9.7 | 0.66 |
+| `pspin` (`pthread_spin_lock`) | 364.3 | 91.1 | 0.63 |
+| `pmutex` (`pthread_mutex_lock`) | 413.0 | 103.2 | 0.94 |
+| `mcs` | 396.7 | 99.2 | 1.00 |
 
-`ttas` finishes its threads together (0.95) and 1.3x sooner than `pthread_spin_lock`, but it changes owner on only 13% of acquisitions against 19% for `pthread_spin_lock`, so part of that lead is longer runs of one thread rather than cheaper hand-offs. The like-for-like comparison is the default run above, where every lock hands over on nearly every acquisition and `ttas` is still ahead. `ttas_park` is 7x faster than `ttas` only because its waiters sleep ≈ 50 us while one thread runs through (0.63).
+`ttas` finishes its threads together (0.93) and 1.3x sooner than `pthread_spin_lock`, but it changes owner on only 12% of acquisitions against 22% for `pthread_spin_lock`, so part of that lead is longer runs of one thread rather than cheaper hand-offs. The like-for-like comparison is the default run above, where every lock hands over on nearly every acquisition and `ttas` is still ahead. `ttas_park` is 7x faster than `ttas` only because its waiters sleep ≈ 50 us while one thread runs through (0.66).
 
 ### Timer slack (`-S`)
 
@@ -246,81 +246,81 @@ With work outside the lock the lock is busy most of the time but not saturated, 
 
 | `-t 4 -l 0 -o 0`, lock | slack 50,000 ns | slack 1,000 ns | slack 1 ns |
 | :--- | ---: | ---: | ---: |
-| `ttas_park` elapsed (ms) / min/max | 37.8 / 0.65 | 99.3 / 0.84 | 128.1 / 0.86 |
-| `ttas` elapsed (ms) / min/max (no sleep, reference) | 258.4 / 0.95 | 255.4 / 0.94 | 260.1 / 0.94 |
+| `ttas_park` elapsed (ms) / min/max | 37.4 / 0.59 | 103.7 / 0.81 | 128.0 / 0.84 |
+| `ttas` elapsed (ms) / min/max (no sleep, reference) | 264.6 / 0.93 | 261.9 / 0.92 | 270.9 / 0.94 |
 
-With the 1 us backoff cap the park is the whole wait, and the slack sets its length: over 2,000 samples on a P-core, `nanosleep(1 us)` returns after a median of 52.0 us at the default slack, 3.1 us at `-S 1000` and 1.9 us at `-S 1`. Shortening it brings the parked waiters back sooner, and `ttas_park` goes from 37.8 ms to 128.1 ms (3.4x) with no code change, while the pure-spin `ttas` stays at ≈ 258 ms. A `ttas_park` result is therefore a property of the kernel's timer slack as much as of the lock; report `-S` (or the header's `Timer Slack`) with it.
+With the 1 us backoff cap the park is the whole wait, and the slack sets its length: over 2,000 samples on a P-core, `nanosleep(1 us)` returns after a median of 52.3 us at the default slack, 3.3 us at `-S 1000` and 1.9 us at `-S 1`. Shortening it brings the parked waiters back sooner, and `ttas_park` goes from 37.4 ms to 128.0 ms (3.4x) with no code change, while the pure-spin `ttas` stays at ≈ 265 ms. A `ttas_park` result is therefore a property of the kernel's timer slack as much as of the lock; report `-S` (or the header's `Timer Slack`) with it.
 
 ### Backoff cap (`-M`, 4 threads, empty critical section)
 
 | `-M` (ns) | `ttas` elapsed (ms) / ns/acq / min/max | `ttas_park` elapsed (ms) / min/max | `pspin` elapsed (ms) / min/max |
 | :--- | ---: | ---: | ---: |
-| 256 | 324.0 / 81.0 / 0.94 | 34.9 / 0.75 | 373.8 / 0.68 |
-| 1,024 (default) | 256.3 / 64.1 / 0.94 | 37.8 / 0.71 | 366.7 / 0.70 |
-| 8,192 | 95.0 / 23.7 / 0.68 | 43.2 / 0.73 | 326.5 / 0.66 |
-| 65,536 | 40.9 / 10.2 / 0.51 | 42.7 / 0.57 | 355.1 / 0.69 |
-| 167,000 | 37.5 / 9.4 / 0.49 | 37.4 / 0.55 | 370.6 / 0.68 |
+| 256 | 312.2 / 78.1 / 0.93 | 33.1 / 0.73 | 347.3 / 0.65 |
+| 1,024 (default) | 261.2 / 65.3 / 0.91 | 36.9 / 0.59 | 355.7 / 0.62 |
+| 8,192 | 85.5 / 21.4 / 0.61 | 40.1 / 0.59 | 361.9 / 0.64 |
+| 65,536 | 41.3 / 10.3 / 0.50 | 40.2 / 0.40 | 337.2 / 0.54 |
+| 167,000 | 38.9 / 9.7 / 0.47 | 38.3 / 0.48 | 368.1 / 0.63 |
 
-Up to a microsecond `ttas` finishes its threads together and beats `pthread_spin_lock`; from ≈ 8 us it becomes a serialiser, several times "faster" at min/max 0.5–0.7. The previous default, 16,000 pauses (≈ 167 us on a P-core, ≈ 351 us on an E-core), sat at that end. In the sweep below the 1 us cap is 3–6% behind `pthread_spin_lock` at 256 NOPs with 2–8 threads and ahead of it or level everywhere else.
+Up to a microsecond `ttas` finishes its threads together and beats `pthread_spin_lock`; from ≈ 8 us it becomes a serialiser, several times "faster" at min/max 0.5–0.6. The previous default, 16,000 pauses (≈ 167 us on a P-core, ≈ 351 us on an E-core), sat at that end. In the sweep below the 1 us cap is 3% and 9% behind `pthread_spin_lock` at 256 NOPs with 4 and 8 threads and ahead of it or level everywhere else.
 
 ### Oversubscription on the four P-cores (`-t 8` and `-t 16`, `-l 0 -o 0`)
 
 | Lock | 8 threads: elapsed (ms) | ns/acq | min/max | 16 threads: elapsed (ms) | ns/acq | min/max |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `ttas` | 955.0 | 119.4 | 0.93 | 3,490.8 | 218.2 | 0.87 |
-| `ttas_park` | 288.7 | 36.1 | 0.75 | 7,200.5 | 450.0 | 0.81 |
-| `pspin` | 1,362.5 | 170.3 | 0.66 | 4,997.5 | 312.3 | 0.61 |
-| `pmutex` | 729.8 | 91.2 | 0.96 | 1,603.9 | 100.2 | 0.88 |
-| `mcs` (10,000 / 5,000 iterations per thread) | 50,469 | 630,865 | 1.00 | 98,398 | 1,229,978 | 0.00 |
+| `ttas` | 977.7 | 122.2 | 0.92 | 3,692.0 | 230.7 | 0.87 |
+| `ttas_park` | 239.2 | 29.9 | 0.65 | 7,265.5 | 454.1 | 0.72 |
+| `pspin` | 1,452.0 | 181.5 | 0.57 | 5,343.8 | 334.0 | 0.56 |
+| `pmutex` | 728.1 | 91.0 | 0.95 | 1,583.7 | 99.0 | 0.90 |
+| `mcs` (10,000 / 5,000 iterations per thread) | 52,944 | 661,794 | 0.98 | 131,773 | 1,647,162 | 0.52 |
 
-Once threads outnumber cores the lock holder gets preempted. The POSIX spinlock's waiters spin through their whole timeslice (170 → 312 ns/acq); the mutex parks them in the kernel and stays at ≈ 100 ns/acq. `ttas` stays fair and ahead of `pspin` but behind the mutex. `ttas_park` is the fastest at 8 threads and the slowest at 16. MCS collapses: a preempted successor stalls the whole queue for a scheduler quantum, ≈ 0.6 ms per acquisition at 8 threads and 1.2 ms at 16 (one launch, one page each), which is why the sweep drops it above the core budget.
+Once threads outnumber cores the lock holder gets preempted. The POSIX spinlock's waiters spin through their whole timeslice (182 → 334 ns/acq); the mutex parks them in the kernel and stays at ≈ 90–100 ns/acq. `ttas` stays fair and ahead of `pspin` but behind the mutex. `ttas_park` is the fastest at 8 threads and, MCS aside, the slowest at 16. MCS collapses: a preempted successor stalls the whole queue for a scheduler quantum, ≈ 0.7 ms per acquisition at 8 threads and 1.6 ms at 16 (one launch, one page each), which is why the sweep drops it above the core budget.
 
-### A longer critical section (`-t 4 -l 4096 -o 0`, ≈ 0.46 us held)
+### A longer critical section (`-t 4 -l 4096 -o 0`, ≈ 0.23 us held)
 
 | Lock | 1 thread (ms) | 4 threads (ms) | min/max |
 | :--- | ---: | ---: | ---: |
-| `ttas` | 468.4 | 2,085.3 | 0.41 |
-| `ttas_park` | 468.3 | 2,079.7 | 0.40 |
-| `pspin` | 470.5 | 2,103.9 | 0.46 |
-| `pmutex` | 473.8 | 3,416.2 | 0.98 |
-| `mcs` | 470.0 | 2,624.0 | 1.00 |
+| `ttas` | 239.1 | 1,134.6 | 0.42 |
+| `ttas_park` | 248.0 | 1,168.8 | 0.44 |
+| `pspin` | 240.5 | 1,128.9 | 0.40 |
+| `pmutex` | 243.6 | 2,450.6 | 0.95 |
+| `mcs` | 242.0 | 1,794.9 | 1.00 |
 
-The critical section dominates: 4 × 468 ms = 1,873 ms of serialised work is the floor. The three spinlocks land within 11–12% of it and their ordering is gone (`ttas`/`pspin` = 0.99x). MCS adds ≈ 186 ns per hand-off, the mutex ≈ 380 ns: with a 0.46 us hold every acquisition is contended, so every mutex hand-off goes through a futex wake. The spinlocks' min/max stays at 0.4–0.5 because a released lock goes to whichever waiter sees it first.
+The critical section dominates: 4 × 239 ms = 956 ms of serialised work is the floor. The three spinlocks land 18–22% above it and their ordering is gone (`ttas`/`pspin` = 1.01x). MCS adds ≈ 210 ns per hand-off, the mutex ≈ 374 ns: with a 0.23 us hold every acquisition is contended, so every mutex hand-off goes through a futex wake. The spinlocks' min/max stays at ≈ 0.4 because a released lock goes to whichever waiter sees it first.
 
 ### Uncontended cost (`-t 1 -l 0 -o 0`, ns per lock/unlock pair)
 
-`ttas` 6.1 · `ttas_park` 6.1 · `pspin` 7.6 · `pmutex` 13.2 · `mcs` 14.5. Single-threaded, the custom TTAS lock is 1.6 ns ahead of `pthread_spin_lock`. The two use the same test-and-test-and-set loop (glibc's has no backoff), but `pthread_spin_lock` and `pthread_spin_unlock` are two calls into libc through the PLT per acquisition, while the custom locks are inlined into the loop.
+`ttas` 6.0 · `ttas_park` 6.1 · `pspin` 7.6 · `pmutex` 13.2 · `mcs` 14.5. Single-threaded, the custom TTAS lock is 1.6 ns ahead of `pthread_spin_lock`. The two use the same test-and-test-and-set loop (glibc's has no backoff), but `pthread_spin_lock` and `pthread_spin_unlock` are two calls into libc through the PLT per acquisition, while the custom locks are inlined into the loop.
 
 ### Core types and contention levels
 
-*Each cell: 7 launches × 4 pages, 300,000 iterations per thread, workers pinned to the listed CPUs (the mixed set alternates P- and E-cores). Work inside and outside the lock is sized in nanoseconds with each class's NOP cost (0.1115 ns on a P-core, 0.1432 ns on an E-core); the mixed set uses the P-core size, so the same work takes 1.28x longer on its E-cores. Ratios are paired per launch, and **bold** marks a ratio significant at a 5% false discovery rate over all 45 cells.*
+*Each cell: 7 launches × 4 pages, 300,000 iterations per thread, workers pinned to the listed CPUs (the mixed set alternates P- and E-cores), the 45 cells run in shuffled order. Work inside and outside the lock is sized in nanoseconds with each class's NOP cost (0.0557 ns on a P-core, 0.1432 ns on an E-core); the mixed set uses the P-core size, so the same work takes 2.6x longer on its E-cores. Ratios are paired per launch, and **bold** marks a ratio significant at a 5% false discovery rate over all 45 cells (paired bootstrap, Benjamini–Hochberg).*
 
 `pspin`/`ttas` elapsed-time ratio (>1 = `ttas` finished sooner):
 
 | Inside / outside the lock (ns) | P-cores 0-3, 2 thr | P-cores 0-3, 4 thr | P-cores 0-3, 8 thr | E-cores 4-7, 2 thr | E-cores 4-7, 4 thr | E-cores 4-7, 8 thr | P and E mixed, 2 thr | P and E mixed, 4 thr | P and E mixed, 8 thr |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 / 0 (saturated) | **4.15x** | **1.33x** | **1.50x** | 0.79x | 0.83x | 0.91x | 1.21x | 1.03x | **1.05x** |
-| 50 / 0 (saturated) | **1.02x** | 1.01x | 1.00x | 1.00x | **1.03x** | 1.02x | **0.97x** | 1.00x | 1.03x |
-| 50 / 150 (default) | **1.01x** | **1.21x** | **1.29x** | **1.01x** | **0.98x** | **1.07x** | **0.81x** | 1.03x | **0.75x** |
-| 50 / 1,000 | 1.00x | 1.00x | **1.12x** | **1.00x** | **1.00x** | 1.02x | **0.95x** | **0.98x** | 1.20x |
-| 200 / 600 | 1.00x | 1.06x | **1.07x** | 1.00x | **1.01x** | **1.05x** | 0.96x | **1.09x** | **1.29x** |
+| 0 / 0 (saturated) | **4.73x** | **1.29x** | **1.47x** | 1.09x | **1.30x** | **1.38x** | **1.37x** | 0.99x | 1.00x |
+| 50 / 0 (saturated) | **1.03x** | **1.01x** | **1.02x** | **1.03x** | **1.03x** | **1.04x** | 0.96x | 1.04x | 1.06x |
+| 50 / 150 (default) | **1.04x** | **1.22x** | **1.25x** | **1.01x** | **1.10x** | **1.14x** | **0.94x** | **1.13x** | 1.02x |
+| 50 / 1,000 | **1.06x** | **1.07x** | **1.15x** | **1.00x** | **1.00x** | **1.05x** | **0.99x** | **1.01x** | **1.17x** |
+| 200 / 600 | **1.01x** | **1.10x** | **1.09x** | **1.00x** | **1.00x** | **1.04x** | **0.99x** | 1.03x | **0.96x** |
 
 Fastest lock (two names = not significantly apart, 5% false discovery rate over 45 cells):
 
 | Inside / outside the lock (ns) | P-cores 0-3, 2 thr | P-cores 0-3, 4 thr | P-cores 0-3, 8 thr | E-cores 4-7, 2 thr | E-cores 4-7, 4 thr | E-cores 4-7, 8 thr | P and E mixed, 2 thr | P and E mixed, 4 thr | P and E mixed, 8 thr |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 / 0 (saturated) | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` | `ttas_park` |
-| 50 / 0 (saturated) | `ttas` = `ttas_park` | `pspin` = `ttas_park` | `ttas` = `pspin` | `ttas_park` | `ttas_park` | `ttas_park` = `ttas` | `pspin` = `ttas_park` | `ttas_park` = `ttas` | `ttas_park` = `ttas` |
-| 50 / 150 (default) | `ttas` = `ttas_park` | `mcs` | `ttas` = `pmutex` | `ttas` | `ttas_park` | `ttas` | `pspin` | `ttas_park` | `ttas_park` |
-| 50 / 1,000 | `ttas` = `pspin` | `ttas` = `pspin` | `pmutex` | `ttas` | `ttas` = `ttas_park` | `pmutex` | `pspin` | `pspin` | `mcs` = `ttas` |
-| 200 / 600 | `ttas` = `pspin` | `ttas_park` = `ttas` | `ttas_park` = `ttas` | `pspin` = `ttas` | `ttas` | `pmutex` | `pspin` = `ttas` | `mcs` = `ttas` | `ttas_park` |
+| 50 / 0 (saturated) | `ttas` = `ttas_park` | `ttas` = `ttas_park` | `ttas` | `ttas` | `ttas_park` = `ttas` | `ttas_park` = `ttas` | `pspin` = `ttas_park` | `ttas_park` = `ttas` | `ttas` = `ttas_park` |
+| 50 / 150 (default) | `ttas` | `mcs` | `pmutex` = `ttas` | `ttas` = `ttas_park` | `ttas_park` | `ttas` | `pspin` | `ttas_park` | `ttas_park` |
+| 50 / 1,000 | `ttas` | `ttas` | `pmutex` | `ttas_park` = `ttas` | `ttas` | `pmutex` | `pspin` | `mcs` | `ttas` |
+| 200 / 600 | `ttas` | `ttas` | `ttas` | `ttas_park` | `ttas` = `ttas_park` | `pmutex` | `pspin` | `ttas` = `pspin` | `ttas_park` |
 
 Each cell is a direct harness run, `-C <cpus> -t <threads> -l <nops> -o <nops> -i 300000 -P 0-3`.
 
-- **One class of fast cores** (what the default pinning picks): `ttas` is never significantly behind `pthread_spin_lock`, and it is ahead whenever many threads contend, saturated or not.
-- **E-cores only**: these share one L2 and have no L3 on this part, so a hand-off costs ≈ 17–25 ns instead of ≈ 50–85 ns on the P-cores. The two spinlocks are level in most cells. The largest gaps are `ttas` 5–7% ahead at 8 threads and `pthread_spin_lock` 9–21% ahead, not significantly, on the saturated empty critical section.
-- **P- and E-cores mixed**: here `ttas` loses. At the default load `pthread_spin_lock` finished sooner at 2 and 8 threads, by 19% and 25% here and by 5% and 13% in a separate 9-launch replication; at light contention it was ahead by 2–5%. Keep the workers on one core class, as the default pinning does.
-- **No lock wins everywhere**: `ttas_park` wins every saturated empty critical section by parking its waiters, MCS wins the default load on 4 P-cores, and the mutex wins at 8 threads on 4 cores with 1 us of work outside the lock.
+- **One class of fast cores** (what the default pinning picks): `ttas` finished significantly sooner than `pthread_spin_lock` in all 15 P-core cells: by 1–15% with work in or outside the lock, by 22–25% at the default load with 4 and 8 threads, and by 1.3–4.7x on the saturated empty critical section.
+- **E-cores only**: these share one L2 and have no L3 on this part, so a hand-off is cheaper: MCS, which hands over on nearly every acquisition, takes 44–87 ns per acquisition on the saturated empty critical section against 100–110 ns on the P-cores. `ttas` is ahead of `pthread_spin_lock` or level in every cell, by 30–38% on the saturated empty critical section and by 10–14% at the default load, both with 4 and 8 threads.
+- **P- and E-cores mixed**: neither spinlock wins throughout. With 2 threads `pthread_spin_lock` finished sooner whenever there was work outside the lock (by 1–6%, and by 5% in a separate 9-launch replication of the default load); with 4 threads `ttas` did at the default load (13%); with 8 threads the winner flips between 1 us outside the lock (`ttas`, 17%) and 200 / 600 ns (`pthread_spin_lock`, 4%), and the default load is level (1.02x here, 1.03x in the replication). Keep the workers on one core class, as the default pinning does.
+- **No lock wins everywhere**: `ttas_park` wins every saturated empty critical section by parking its waiters, MCS wins the default load on 4 P-cores and 1 us of outside work on 4 mixed cores, and the mutex wins with 8 threads on 4 P- or E-cores once the work outside the lock reaches 1 us (on the E-cores also at 200 / 600 ns).
 
 ## Automated Benchmarking & Visualization
 
@@ -335,13 +335,13 @@ The dashboard is a dark board (Binance-style design-system palette):
 - **Eight scaling panels** (one per critical-section size, titled with its size in NOPs and in nanoseconds from the measured NOP cost), each plotting **nanoseconds per lock/unlock vs thread count** on a shared log axis. Each lock is a coloured line through its **median**, with its **launches as a candle** (body = interquartile range, wicks = min/max, locks offset side by side) to show run-to-run spread; the region where threads exceed the pinned cores is shaded **oversubscribed** (it degrades every lock, not just MCS). Latency is amortised across all threads (elapsed ÷ total ops), so a rising line is genuine contention overhead rather than just more work retired — it is the same measurement the results table reports as ms per 1M per-thread ops, divided by the thread count. Read it together with the harness's fairness line: amortised latency rewards a lock that lets one thread run through while the others wait.
 - **Two elapsed-time ratio heatmaps** (POSIX/TTAS and MCS/TTAS) over critical-section × threads, sharing one colour scale so the two are directly comparable. Colour is `log2(ratio)` diverging around break-even (green = TTAS finished sooner, red = later, per the trading up/down semantic); each ratio is the median of per-launch paired ratios, and cells **not significant at a 5% false discovery rate** (paired bootstrap, Benjamini–Hochberg) are greyed instead of being painted as a decisive winner, and MCS's oversubscribed column is hatched `n/a`.
 
-**Why the MCS line stops at the pinned core count.** MCS is a *strict FIFO queue* lock, so under oversubscription (more threads than pinned cores) it **convoys**: when the scheduler preempts the thread whose turn it is, every thread queued behind it stalls until that one successor is rescheduled again, and wall-clock time explodes (≈ 0.5 ms per acquisition at 8 threads on 4 cores here, versus ≈ 0.1 us subscribed), often to a timeout that would also starve the other contenders' samples. Test-and-set locks (TTAS, `pthread_spin_lock`) degrade under oversubscription but do not collapse this way. The sweep therefore drops MCS for thread counts above the pinned core budget (`run_mcs = t <= core_budget` in `test_bench.py`) rather than let a convoyed, timeout-dominated cell distort the comparison; on the machine below (4 pinned P-cores) that means MCS is measured at 1/2/4 threads and shown as `n/a` at 8. It is not a zero and not a win — and because the whole 8-thread column is oversubscribed for *every* lock, that regime is shaded so the caveat attaches to all five.
+**Why the MCS line stops at the pinned core count.** MCS is a *strict FIFO queue* lock, so under oversubscription (more threads than pinned cores) it **convoys**: when the scheduler preempts the thread whose turn it is, every thread queued behind it stalls until that one successor is rescheduled again, and wall-clock time explodes (≈ 0.7 ms per acquisition at 8 threads on 4 cores here, versus ≈ 0.1 us subscribed), often to a timeout that would also starve the other contenders' samples. Test-and-set locks (TTAS, `pthread_spin_lock`) degrade under oversubscription but do not collapse this way. The sweep therefore drops MCS for thread counts above the pinned core budget (`run_mcs = t <= core_budget` in `test_bench.py`) rather than let a convoyed, timeout-dominated cell distort the comparison; on the machine below (4 pinned P-cores) that means MCS is measured at 1/2/4 threads and shown as `n/a` at 8. It is not a zero and not a win — and because the whole 8-thread column is oversubscribed for *every* lock, that regime is shaded so the caveat attaches to all five.
 
 The lock colours follow the trading-semantics palette — **TTAS** green (up), **MCS** red (down), **POSIX spinlock** blue (info) — extended with **TTAS Spin+Park** amber and **POSIX mutex** cyan, each with a distinct marker, so the series stay separable under colour-vision deficiency and after the image is downscaled (thin marks that vanish on GitHub's down-sampling are avoided by construction). Type is set in Pretendard.
 
-The critical section is emulated with N filler NOPs; the harness measures the cost of that loop at startup and prints it as `NOP Cost` (≈ 0.11 ns/NOP on this CPU), which the report and the plot use to label sizes in nanoseconds. The workload range is a powers-of-two sweep, deliberately dense in the regime where a spinlock is the right tool — small, fast updates to shared state: `0` (pure lock contention, no CS), `16`/`32`/`64` (≈ 2–7 ns: a flag flip, a pointer swap, a couple of struct fields), `128`/`256` (≈ 14–29 ns: a small struct), `512` (≈ 57 ns), and `1,024` (≈ 114 ns, a medium CS shown for context). Heavier critical sections are intentionally omitted: holding a busy-wait spinlock that long is the wrong design, so benchmarking it would not inform a real spinlock choice.
+The critical section is emulated with N filler NOPs; the harness measures the cost of that loop at startup and prints it as `NOP Cost` (≈ 0.056 ns/NOP on this CPU's P-cores with the `-O2` build), which the report and the plot use to label sizes in nanoseconds. The workload range is a powers-of-two sweep, deliberately dense in the regime where a spinlock is the right tool — small, fast updates to shared state: `0` (pure lock contention, no CS), `16`/`32`/`64` (≈ 1–4 ns: a flag flip, a pointer swap, a couple of struct fields), `128`/`256` (≈ 7–14 ns: a small struct), `512` (≈ 29 ns), and `1,024` (≈ 57 ns, a medium CS shown for context). Heavier critical sections are intentionally omitted: holding a busy-wait spinlock that long is the wrong design, so benchmarking it would not inform a real spinlock choice.
 
-**Measurement isolation.** To keep external interference out of each measurement, every benchmark process pins its workers to a homogeneous core set (see above), locks its resident pages into RAM (`mlockall(MCL_CURRENT)`, best-effort), warms every contender, and inserts a quiescent settle gap both between consecutive in-process lock measurements (`SETTLE_DELAY_MS`, default 100 ms) and between consecutive process launches (`SETTLE_SEC`, default 0.3 s) so one run cannot bias the next. Elapsed time comes from the workers' own timestamps (first start to last finish), so the main thread's wake-up and join latency stay out of it. The randomized sweeps showed no lock-order, drift, preemption or frequency effect on the results. Most of the remaining spread comes from placement: the page that holds the locks and the counter maps to one of this CPU's four L3 slices, and in a dedicated experiment the slice, identified with uncore counters, moved a lock's time by up to 28% and explained 57–97% of the page-to-page variance in five of six tested cells. Each launch therefore measures every lock on four pages.
+**Measurement isolation.** To keep external interference out of each measurement, every benchmark process pins its workers to a homogeneous core set (see above), locks its resident pages into RAM (`mlockall(MCL_CURRENT)`, best-effort), warms every contender, and inserts a quiescent settle gap both between consecutive in-process lock measurements (`SETTLE_DELAY_MS`, default 100 ms) and between consecutive process launches (`SETTLE_SEC`, default 0.3 s) so one run cannot bias the next. Elapsed time comes from the workers' own timestamps (first start to last finish), so the main thread's wake-up and join latency stay out of it. In the latest sweep a run's position in its launch and the launch's place in the sweep do not move its time (Spearman ρ +0.01 and −0.03 on average over 152 cells), and a run's involuntary context switches only weakly (ρ ≈ +0.1). Most of the remaining spread comes from placement: the page that holds the locks and the counter maps to one of this CPU's four L3 slices, and in a dedicated experiment (run with the earlier `-O3` build) the slice, identified with uncore counters, moved a lock's time by up to 28% and explained 57–97% of the page-to-page variance in five of six tested cells. Each launch therefore measures every lock on four pages.
 
 The full raw measurement table (8 workloads × 4 thread counts × 5 locks — Custom TTAS, Custom TTAS Spin+Park, Custom MCS, POSIX spinlock and POSIX mutex — × 7–14 launches × 4 pages, with MCS omitted at the oversubscribed 8-thread point) is shipped as [`bench_results.csv`](bench_results.csv) for downstream analysis.
 
@@ -377,4 +377,4 @@ One tool finding was itself a false positive and is documented rather than worke
 
 The helgrind / TSan warnings are **expected**: both detectors only recognise synchronization expressed through `pthread` primitives or C11 `<stdatomic.h>`, and our spinlocks acquire through raw atomic instructions (TTAS: `lock cmpxchgl` on x86-64; an `ldaxr`/`stlxr` load-acquire CAS — or a single `casa` load-acquire CAS under v8.1 LSE — with an `stlr` release on aarch64. MCS: `xchg`/`lock cmpxchg` on x86-64; `swpal`/`casl` under LSE or `ldaxr`/`stlxr` LL/SC, with `ldar`/`stlr` hand-off, on aarch64) over `volatile`-qualified words, which they cannot pattern-match; every flagged stack is in `ttas_acquire`, `spin_unlock_ttas` or the MCS task, none in the `pspin`/`pmutex` contenders. `drd` ignores them because of how it tracks vector clocks per memory access. None of the tools reported a memory error and every run produced the expected atomic count. A NULL lock pointer is not checked: `spin_lock_ttas(NULL)` and the other four entry points fault with `SIGSEGV`. The debug build's `SPINLOCK_DEBUG` checks catch the other misuse class, releasing a lock that is not held and nesting the MCS wrapper, by aborting at the call site.
 
-The results above are from the x86-64 build. On aarch64, correctness is established by construction: for **all three** lock disciplines every acquire/release path is confirmed by per-function disassembly (`ttas_try_acquire`: `casa` under `-march=armv8.1-a`, `ldaxr`/`stlxr`/`clrex` on baseline `-march=armv8-a`; `mcs_swap_queue_tail`: `swpal` / `ldaxr`+`stlxr`; `mcs_try_reset_queue_tail`: `casl` / `ldxr`+`stlxr`; releases via `stlr`, acquires via `ldar`), both builds compile without errors at `-O3` and `-O0`, and the atomic-count oracle passes under QEMU (`qemu-aarch64`) for both builds and all five contenders at 4 and 8 threads, with and without `-S`. Note that QEMU-user does not reproduce weak-memory reordering, so the guarantee rests on the architecturally-correct acquire/release barriers rather than on the emulator.
+The results above are from the x86-64 build. On aarch64, correctness is established by construction: for **all three** lock disciplines every acquire/release path is confirmed by per-function disassembly (`ttas_try_acquire`: `casa` under `-march=armv8.1-a`, `ldaxr`/`stlxr`/`clrex` on baseline `-march=armv8-a`; `mcs_swap_queue_tail`: `swpal` / `ldaxr`+`stlxr`; `mcs_try_reset_queue_tail`: `casl` / `ldxr`+`stlxr`; releases via `stlr`, acquires via `ldar`), both builds compile without errors at `-O2` and `-O0`, and the atomic-count oracle passes under QEMU (`qemu-aarch64`) for both builds and all five contenders at 4 and 8 threads, with and without `-S`. Note that QEMU-user does not reproduce weak-memory reordering, so the guarantee rests on the architecturally-correct acquire/release barriers rather than on the emulator.
