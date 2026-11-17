@@ -221,7 +221,7 @@ static void record_loop_end(struct worker_context *const mut_context)
 
 static void *run_ttas_worker(void *const mut_arg_nullable)
 {
-    struct worker_context *context = mut_arg_nullable;
+    struct worker_context *const context = mut_arg_nullable;
 
     if (context == NULL) {
         return NULL;
@@ -259,7 +259,7 @@ static void *run_ttas_worker(void *const mut_arg_nullable)
 
 static void *run_ttas_park_worker(void *const mut_arg_nullable)
 {
-    struct worker_context *context = mut_arg_nullable;
+    struct worker_context *const context = mut_arg_nullable;
 
     if (context == NULL) {
         return NULL;
@@ -297,7 +297,7 @@ static void *run_ttas_park_worker(void *const mut_arg_nullable)
 
 static void *run_mcs_worker(void *const mut_arg_nullable)
 {
-    struct worker_context *context = mut_arg_nullable;
+    struct worker_context *const context = mut_arg_nullable;
 
     if (context == NULL) {
         return NULL;
@@ -335,7 +335,7 @@ static void *run_mcs_worker(void *const mut_arg_nullable)
 
 static void *run_posix_spinlock_worker(void *const mut_arg_nullable)
 {
-    struct worker_context *context = mut_arg_nullable;
+    struct worker_context *const context = mut_arg_nullable;
 
     if (context == NULL) {
         return NULL;
@@ -373,7 +373,7 @@ static void *run_posix_spinlock_worker(void *const mut_arg_nullable)
 
 static void *run_posix_mutex_worker(void *const mut_arg_nullable)
 {
-    struct worker_context *context = mut_arg_nullable;
+    struct worker_context *const context = mut_arg_nullable;
 
     if (context == NULL) {
         return NULL;
@@ -411,7 +411,7 @@ static void *run_posix_mutex_worker(void *const mut_arg_nullable)
 
 static void *run_nop_calibration(void *const mut_arg)
 {
-    struct nop_calibration *calibration = mut_arg;
+    struct nop_calibration *const calibration = mut_arg;
     struct timespec warmup_begin_time;
     struct timespec pass_end_time;
 
@@ -453,7 +453,7 @@ static void parse_contender_list(const char *const argument_text)
         size_t contender_index;
 
         for (contender_index = 0; contender_index < BENCH_LOCK_COUNT; ++contender_index) {
-            const char *cli_key = gs_contenders[contender_index].cli_key;
+            const char *const cli_key = gs_contenders[contender_index].cli_key;
 
             if (token_length == strlen(cli_key) && strncmp(cursor, cli_key, token_length) == 0) {
                 break;
@@ -546,8 +546,8 @@ static size_t parse_index_list(size_t **const mut_indexes, const char *const arg
             if (index_count == indexes_capacity) {
                 indexes_capacity *= 2;
 
-                size_t *grown_indexes = realloc(*mut_indexes,
-                                                indexes_capacity * sizeof(**mut_indexes));
+                size_t *const grown_indexes = realloc(*mut_indexes,
+                                                      indexes_capacity * sizeof(**mut_indexes));
                 if (grown_indexes == NULL) {
                     perror("realloc");
                     exit(EXIT_FAILURE);
@@ -701,8 +701,8 @@ static void map_placement_pool(void)
     gs_placement_page_stride = (page_size > 0) ? (size_t)page_size : 4096;
     gs_placement_pool_size = (highest_page + 1) * gs_placement_page_stride;
 
-    void *pool_mapping = mmap(NULL, gs_placement_pool_size, PROT_READ | PROT_WRITE,
-                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *const pool_mapping = mmap(NULL, gs_placement_pool_size, PROT_READ | PROT_WRITE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (pool_mapping == MAP_FAILED) {
         perror("mmap");
         exit(EXIT_FAILURE);
@@ -826,7 +826,7 @@ static void sleep_settle_gap(void)
 }
 
 static struct contender_measurement run_contender(struct contended_objects *const mut_objects,
-                                                  void *(*worker_routine)(void *const mut_arg),
+                                                  void *(*const worker_routine)(void *const mut_arg),
                                                   int is_measured_pass)
 {
     if (is_measured_pass != 0) {
@@ -993,7 +993,7 @@ static void print_contender_measurement(enum bench_lock lock_id, size_t run_posi
  * i-cache / branch predictors before it is measured. Every contender is warmed
  * with the same pinning as the real run so none is charged a cold first pass.
  */
-static void run_warmup_pass(void *(*worker_routine)(void *const mut_arg))
+static void run_warmup_pass(void *(*const worker_routine)(void *const mut_arg))
 {
     const size_t configured_iterations = gs_conf_iterations;
     const size_t warmup_iterations = configured_iterations / 10;

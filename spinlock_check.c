@@ -179,7 +179,7 @@ static void release_broken_no_op(struct contended_lock_pair *const mut_locks,
 
 static void *run_contended_worker(void *const mut_arg)
 {
-    struct contended_worker_args *args = mut_arg;
+    const struct contended_worker_args *const args = mut_arg;
     struct mcs_node node_a = { 0 };
     struct mcs_node node_b = { 0 };
 
@@ -199,8 +199,8 @@ static void *run_contended_worker(void *const mut_arg)
     return NULL;
 }
 
-static void run_contended_check(const char *const check_name, lock_callback acquire,
-                                lock_callback release, int is_overlap_expected)
+static void run_contended_check(const char *const check_name, const lock_callback acquire,
+                                const lock_callback release, int is_overlap_expected)
 {
     struct contended_lock_pair locks;
     struct overlap_probe probe = { 0 };
@@ -283,7 +283,7 @@ static void run_contended_check(const char *const check_name, lock_callback acqu
 
 static void check_ttas_uncontended_state_transitions(void)
 {
-    const char *check_name = "ttas uncontended lock/unlock toggles is_locked";
+    const char *const check_name = "ttas uncontended lock/unlock toggles is_locked";
     struct spinlock_ttas lock;
 
     spin_init_ttas(&lock);
@@ -314,7 +314,7 @@ static void check_ttas_uncontended_state_transitions(void)
 
 static void check_ttas_cas_fails_while_held(void)
 {
-    const char *check_name = "ttas cas fails while the lock is held";
+    const char *const check_name = "ttas cas fails while the lock is held";
     struct spinlock_ttas lock;
 
     spin_init_ttas(&lock);
@@ -341,7 +341,7 @@ static void check_ttas_cas_fails_while_held(void)
 
 static void check_mcs_uncontended_state_transitions(void)
 {
-    const char *check_name = "mcs uncontended lock/unlock maintains queue_tail";
+    const char *const check_name = "mcs uncontended lock/unlock maintains queue_tail";
     struct spinlock_mcs lock;
     struct mcs_node explicit_node = { 0 };
 
@@ -381,7 +381,7 @@ static void check_mcs_uncontended_state_transitions(void)
 
 static void check_mcs_two_locks_two_nodes_same_thread(void)
 {
-    const char *check_name = "mcs one thread holds two locks through two explicit nodes";
+    const char *const check_name = "mcs one thread holds two locks through two explicit nodes";
     struct spinlock_mcs lock_a;
     struct spinlock_mcs lock_b;
     struct mcs_node node_a = { 0 };
@@ -407,7 +407,7 @@ static void check_mcs_two_locks_two_nodes_same_thread(void)
 
 static void *run_mcs_helper_thread(void *const mut_arg)
 {
-    struct spinlock_mcs *lock = mut_arg;
+    struct spinlock_mcs *const lock = mut_arg;
 
     spin_lock_mcs(lock);
     spin_unlock_mcs(lock);
@@ -416,7 +416,7 @@ static void *run_mcs_helper_thread(void *const mut_arg)
 
 static void check_mcs_wrapper_node_is_per_thread(void)
 {
-    const char *check_name = "mcs wrapper node is thread-local, another thread queues behind it";
+    const char *const check_name = "mcs wrapper node is thread-local, another thread queues behind it";
     struct spinlock_mcs lock;
     pthread_t helper_thread;
 
@@ -457,7 +457,7 @@ static void check_mcs_wrapper_node_is_per_thread(void)
 
 static void check_backoff_cap_boundaries(void)
 {
-    const char *check_name = "ttas backoff survives extreme cap values";
+    const char *const check_name = "ttas backoff survives extreme cap values";
     struct spinlock_ttas lock;
     const int saved_backoff_min_ns = g_conf_backoff_min_ns;
     const int saved_backoff_max_ns = g_conf_backoff_max_ns;
@@ -486,7 +486,7 @@ static void check_backoff_cap_boundaries(void)
 
 static void check_struct_layout(void)
 {
-    const char *check_name = "lock and node types each occupy exactly one aligned cache line";
+    const char *const check_name = "lock and node types each occupy exactly one aligned cache line";
 
     if (sizeof(struct spinlock_ttas) != CACHE_LINE_SIZE ||
         sizeof(struct spinlock_mcs) != CACHE_LINE_SIZE ||
@@ -606,7 +606,7 @@ static void check_debug_misuse_detection(void)
 
 static void choose_iterations_per_thread(void)
 {
-    const char *override_text = getenv("SPINLOCK_CHECK_ITERATIONS");
+    const char *const override_text = getenv("SPINLOCK_CHECK_ITERATIONS");
 
     if (override_text == NULL || override_text[0] == '\0') {
         return;

@@ -435,7 +435,7 @@ static inline int mcs_try_reset_queue_tail(struct mcs_node *volatile *const mut_
                      : "memory");
     return (compare_value == expected_tail) ? 0 : -1;
 # else
-    struct mcs_node *observed_tail;
+    const struct mcs_node *observed_tail;
     int has_store_failed;
 
     __asm__ volatile("1: ldxr    %[observed], %[tail_slot]\n\t"
@@ -529,7 +529,7 @@ static inline void spin_lock_mcs_node(struct spinlock_mcs *const mut_lock,
      * with no hand-off. The swap's ACQUIRE pairs with the predecessor's release
      * below.
      */
-    struct mcs_node *predecessor_node = mcs_swap_queue_tail(&mut_lock->queue_tail, mut_self_node);
+    struct mcs_node *const predecessor_node = mcs_swap_queue_tail(&mut_lock->queue_tail, mut_self_node);
     if (predecessor_node != NULL) {
         /*
          * Set our private flag, link ourselves behind the predecessor, then
