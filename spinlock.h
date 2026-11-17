@@ -254,22 +254,20 @@ static inline int ttas_try_acquire(struct spinlock_ttas *const mut_lock)
      * mismatch leaves the observed value in 'expected_word' (mirroring x86
      * cmpxchg) and clears the monitor via 'clrex'.
      */
-    {
-        int has_store_failed;
+    int has_store_failed;
 
-        __asm__ volatile("1: ldaxr   %w[observed], %[lock_word]\n\t"
-                         "   cmp     %w[observed], %w[expected]\n\t"
-                         "   b.ne    2f\n\t"
-                         "   stlxr   %w[store_failed], %w[desired], %[lock_word]\n\t"
-                         "   cbnz    %w[store_failed], 1b\n\t"
-                         "   b       3f\n\t"
-                         "2: clrex\n\t"
-                         "3:"
-                         : [observed] "=&r"(expected_word), [store_failed] "=&r"(has_store_failed),
-                           [lock_word] "+Q"(mut_lock->is_locked)
-                         : [expected] "r"(SPINLOCK_UNLOCKED), [desired] "r"(desired_word)
-                         : "memory", "cc");
-    }
+    __asm__ volatile("1: ldaxr   %w[observed], %[lock_word]\n\t"
+                     "   cmp     %w[observed], %w[expected]\n\t"
+                     "   b.ne    2f\n\t"
+                     "   stlxr   %w[store_failed], %w[desired], %[lock_word]\n\t"
+                     "   cbnz    %w[store_failed], 1b\n\t"
+                     "   b       3f\n\t"
+                     "2: clrex\n\t"
+                     "3:"
+                     : [observed] "=&r"(expected_word), [store_failed] "=&r"(has_store_failed),
+                       [lock_word] "+Q"(mut_lock->is_locked)
+                     : [expected] "r"(SPINLOCK_UNLOCKED), [desired] "r"(desired_word)
+                     : "memory", "cc");
 # endif /* defined(__ARM_FEATURE_ATOMICS) */
 #endif /* defined(__x86_64__) */
 
@@ -395,17 +393,15 @@ static inline struct mcs_node *mcs_swap_queue_tail(struct mcs_node *volatile *co
                      : [value] "r"(mut_new_tail)
                      : "memory");
 # else
-    {
-        int has_store_failed;
+    int has_store_failed;
 
-        __asm__ volatile("1: ldaxr   %[previous], %[tail_slot]\n\t"
-                         "   stlxr   %w[store_failed], %[value], %[tail_slot]\n\t"
-                         "   cbnz    %w[store_failed], 1b"
-                         : [previous] "=&r"(previous_tail), [store_failed] "=&r"(has_store_failed),
-                           [tail_slot] "+Q"(*mut_queue_tail)
-                         : [value] "r"(mut_new_tail)
-                         : "memory");
-    }
+    __asm__ volatile("1: ldaxr   %[previous], %[tail_slot]\n\t"
+                     "   stlxr   %w[store_failed], %[value], %[tail_slot]\n\t"
+                     "   cbnz    %w[store_failed], 1b"
+                     : [previous] "=&r"(previous_tail), [store_failed] "=&r"(has_store_failed),
+                       [tail_slot] "+Q"(*mut_queue_tail)
+                     : [value] "r"(mut_new_tail)
+                     : "memory");
 # endif
 #endif /* defined(__x86_64__) */
     return previous_tail;
