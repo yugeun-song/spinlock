@@ -421,9 +421,9 @@ def main() -> None:
              "highest-frequency core group on heterogeneous P/E or big.LITTLE machines).")
     parser.add_argument(
         "--binary", type=Path, default=DEFAULT_BENCHMARK_BIN,
-        help="Benchmark executable to run (default: %(default)s, the 'make release' "
+        help="Benchmark executable to run (default: %(default)s, the './build.sh release' "
              "build for this host; pass bin/<arch>-linux-clang-release/spinlock_test "
-             "for a 'make release CC=clang' build).")
+             "for a './build.sh release <arch>-linux-clang' build).")
     parser.add_argument(
         "--seed", type=int, default=None,
         help="Seed for the shuffled schedule and lock order (default: random, recorded in the meta file).")
@@ -441,7 +441,7 @@ def main() -> None:
         return
 
     if not os.access(cli.binary, os.X_OK):
-        print(f"Error: {cli.binary} not found or not executable. Run 'make release' first.",
+        print(f"Error: {cli.binary} not found or not executable. Run './build.sh release' first.",
               file=sys.stderr)
         sys.exit(1)
 

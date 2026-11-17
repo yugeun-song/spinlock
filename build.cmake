@@ -30,28 +30,12 @@ else()
     message(FATAL_ERROR "unsupported host '${host_os}'; build on Linux or Windows")
 endif()
 
-if(BUILD_SCRIPT STREQUAL "make")
-    set(help_hint "make help")
-    set(usage_line "usage: make [goal ...] [VARIABLE=value ...]")
-    set(word_kind goals)
-    set(help_line "  help          print this help")
-    set(front_lines
-"  PRESET=<preset>        configure preset to build (default ${DEFAULT_PRESET})
-  CC=gcc|clang           the host preset of that compiler, CC=<arch>-linux-gnu-gcc a cross preset")
-    set(order_note "Goals run in the order given.")
-else()
-    set(help_hint "${BUILD_SCRIPT} -h")
-    set(usage_line "usage: ${BUILD_SCRIPT} [command ...] [preset] [VARIABLE=value ...]")
-    set(word_kind commands)
-    set(help_line "  -h, --help    print this help")
-    set(front_lines "  <preset>               configure preset to build (default ${DEFAULT_PRESET})")
-    set(order_note "Commands run in the order given; arguments are case-insensitive, except the SANITIZE list.")
-endif()
+set(help_hint "${BUILD_SCRIPT} -h")
 
 set(usage [=[
-@usage_line@
+usage: @BUILD_SCRIPT@ [command ...] [preset] [VARIABLE=value ...]
 
-@word_kind@:
+commands:
   all           the debug and sanitize builds, or the release build with PROFILE=release
   debug         -O0, full debug info, -pg, no default hardening, no PIE
   sanitize      the debug flags plus -fsanitize=SANITIZE
@@ -64,17 +48,17 @@ set(usage [=[
   check         build every mode the preset can link and run its tests
   tidy          clang-tidy over every source with the PROFILE flags
   clangd-check  clangd parses every source and header and prints its errors
-@help_line@
+  -h, --help    print this help
 
 variables:
   PROFILE=debug|release  what all builds and the flags of index, unused, tidy, clangd-check (default debug)
   SANITIZE=<list>        sanitizers of the sanitize build, comma separated (default address)
-@front_lines@
+  <preset>               configure preset to build (default @DEFAULT_PRESET@)
 
 @PRESETS_HELP@
 
 Each mode builds into bin/<preset>-<mode>/ from build/<preset>/, where <preset> is named
-<arch>-<os>-<cc>, for example bin/@DEFAULT_PRESET@-debug/. @order_note@]=])
+<arch>-<os>-<cc>, for example bin/@DEFAULT_PRESET@-debug/. Commands run in the order given; arguments are case-insensitive, except the SANITIZE list.]=])
 string(CONFIGURE "${usage}" usage @ONLY)
 
 function(say text)
