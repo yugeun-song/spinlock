@@ -57,7 +57,13 @@ set(gnu_optimized -O2)
 
 set(msvc_strict /WX)
 set(msvc_strict_link "")
+if(CMAKE_C_EXTENSIONS)
+    set(clang_cl_standard /clang:-std=gnu${CMAKE_C_STANDARD})
+else()
+    set(clang_cl_standard /clang:-std=c${CMAKE_C_STANDARD})
+endif()
 set(msvc_common
+    ${clang_cl_standard}
     /utf-8
     /W4
     -Wshadow
