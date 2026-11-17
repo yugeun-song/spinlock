@@ -99,7 +99,7 @@ struct contender_measurement {
 };
 
 enum output_format {
-    OUTPUT_FORMAT_TEXT,
+    OUTPUT_FORMAT_TEXT = 0,
     OUTPUT_FORMAT_CSV,
 };
 

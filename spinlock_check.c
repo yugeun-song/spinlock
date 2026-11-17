@@ -57,7 +57,7 @@ struct contended_worker_args {
 
 #if defined(SPINLOCK_DEBUG)
 enum misuse_kind {
-    MISUSE_TTAS_UNLOCK_NOT_HELD,
+    MISUSE_TTAS_UNLOCK_NOT_HELD = 0,
     MISUSE_MCS_UNLOCK_EMPTY_QUEUE,
     MISUSE_MCS_WRAPPER_NESTED,
 };

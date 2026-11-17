@@ -56,7 +56,7 @@
 typedef int spinlock_word;
 
 enum spinlock_state {
-    SPINLOCK_UNLOCKED,
+    SPINLOCK_UNLOCKED = 0,
     SPINLOCK_LOCKED,
 };
 
